@@ -23,14 +23,16 @@ ALL=$([[ $# -eq 0 ]] && echo 1 || echo 0)
 step() { printf '\n\033[1m== %s\033[0m\n' "$*"; }
 
 step "frozen contracts"
-if git rev-parse -q --verify refs/tags/contracts-v1 >/dev/null 2>&1 && [[ -z "${SSC_ALLOW_CONTRACT_CHANGES:-}" ]]; then
-  changed=$(git diff --name-only contracts-v1 -- contracts crates/ssc-core | grep -v '^contracts/CHANGE_REQUESTS.md$' || true)
+# Newest contracts-v* tag reachable from HEAD (contracts-v1, contracts-v1.1, ...).
+CTAG=$(git describe --tags --match 'contracts-v*' --abbrev=0 2>/dev/null || true)
+if [[ -n "$CTAG" && -z "${SSC_ALLOW_CONTRACT_CHANGES:-}" ]]; then
+  changed=$(git diff --name-only "$CTAG" -- contracts crates/ssc-core | grep -v '^contracts/CHANGE_REQUESTS.md$' || true)
   if [[ -n "$changed" ]]; then
-    echo "Frozen files changed since contracts-v1 (file a change request instead):"; echo "$changed"; exit 1
+    echo "Frozen files changed since $CTAG (file a change request instead):"; echo "$changed"; exit 1
   fi
-  echo "ok (unchanged since contracts-v1)"
+  echo "ok (unchanged since $CTAG)"
 else
-  echo "skipped (no contracts-v1 tag yet, or SSC_ALLOW_CONTRACT_CHANGES set by the lead)"
+  echo "skipped (no contracts-v* tag yet, or SSC_ALLOW_CONTRACT_CHANGES set by the lead)"
 fi
 
 step "contract conformance"
