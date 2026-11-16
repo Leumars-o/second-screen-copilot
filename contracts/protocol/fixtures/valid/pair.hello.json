@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "type": "pair.hello",
+  "seq": 0,
+  "ts": 1763290000123,
+  "session_id": null,
+  "payload": {
+    "device_name": "Pixel 9",
+    "phone_pub": "3p7bfXt9wbTTW2HC7OQ1Nz+DQ8hbeGdNrfx+FG+IK08=",
+    "proof": "u0E8u0E8u0E8u0E8u0E8u0E8u0E8u0E8u0E8u0E8u0E="
+  }
+}

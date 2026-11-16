@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "description": "Questions the decision model answers in one call per trigger. Same set for Jev (cloud) and Tev1 4B (local). '$profiles' is replaced at runtime with the user's profile ids.",
+  "input_budget_tokens": 500,
+  "state_template": "Last question from the other person:\n{question}\n\nScreen changes:\n{screen_diff}\n\nProfiles: {profiles}",
+  "questions": [
+    { "id": "needs_answer", "type": "bool", "text": "Is the other person asking something the user should answer now?" },
+    { "id": "intent", "type": "choice", "text": "What is the question about?", "choices": ["pricing", "objection", "technical", "scheduling", "small_talk", "none"] },
+    { "id": "answer_tier", "type": "choice", "text": "Which answer does this need: a quick cue, a detailed technical answer, or none?", "choices": ["fast", "strong", "none"] },
+    { "id": "profile", "type": "choice", "text": "Which profile's documents are most relevant?", "choices": "$profiles" },
+    { "id": "urgency", "type": "choice", "text": "How urgently does the user need an answer?", "choices": ["low", "medium", "high"] }
+  ]
+}

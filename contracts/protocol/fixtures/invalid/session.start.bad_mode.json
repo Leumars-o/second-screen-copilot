@@ -1,0 +1,12 @@
+{
+  "v": 1,
+  "type": "session.start",
+  "seq": 1,
+  "ts": 1763290000123,
+  "session_id": "3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d",
+  "payload": {
+    "session_id": "3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d",
+    "profile_id": "sales-product-x",
+    "mode": "hybrid"
+  }
+}

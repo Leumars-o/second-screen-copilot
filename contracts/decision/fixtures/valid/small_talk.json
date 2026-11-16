@@ -1,0 +1,1 @@
+{ "needs_answer": { "value": false, "p": 0.97 }, "intent": { "value": "small_talk", "p": 0.92 }, "answer_tier": { "value": "none", "p": 0.95 }, "profile": { "value": "sales-product-x", "p": 0.4 }, "urgency": { "value": "low", "p": 0.9 } }

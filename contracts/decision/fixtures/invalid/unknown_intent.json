@@ -1,0 +1,1 @@
+{ "needs_answer": { "value": true, "p": 0.9 }, "intent": { "value": "weather", "p": 0.88 }, "answer_tier": { "value": "fast", "p": 0.81 }, "profile": { "value": "sales-product-x", "p": 0.77 }, "urgency": { "value": "high", "p": 0.7 } }

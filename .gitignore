@@ -1,0 +1,14 @@
+target/
+node_modules/
+.next/
+out/
+dist/
+.wrangler/
+.env
+.env.*
+*.sqlite
+*.sqlite-*
+*.db
+.ssc/
+.DS_Store
+*.log

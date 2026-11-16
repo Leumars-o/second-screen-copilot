@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/messages/session.summary.schema.json",
+  "title": "SessionSummary",
+  "description": "PC -> phone, after session.end. Addition to spec v1 (Build Sheet §10).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session_id", "summary", "action_items", "followup_email", "contact_suggestions"],
+  "properties": {
+    "session_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "summary": { "type": "string", "maxLength": 8000 },
+    "action_items": { "type": "array", "maxItems": 50, "items": { "type": "string", "minLength": 1, "maxLength": 400 } },
+    "followup_email": { "type": "string", "maxLength": 8000 },
+    "contact_suggestions": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "name"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+          "name": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "company": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "notes": { "type": "string", "maxLength": 2000 }
+        }
+      }
+    }
+  }
+}

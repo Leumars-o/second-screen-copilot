@@ -1,0 +1,23 @@
+{
+  "v": 1,
+  "type": "session.summary",
+  "seq": 1,
+  "ts": 1763290000123,
+  "session_id": "3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d",
+  "payload": {
+    "session_id": "3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d",
+    "summary": "Acme wants SSO before Q1.",
+    "action_items": [
+      "Send SSO doc"
+    ],
+    "followup_email": "Hi Ada,\n\nThanks for the call...",
+    "contact_suggestions": [
+      {
+        "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        "name": "Ada Obi",
+        "company": "Acme",
+        "notes": "Head of IT"
+      }
+    ]
+  }
+}

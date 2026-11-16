@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/messages/pair.hello.schema.json",
+  "title": "PairHello",
+  "description": "Phone -> PC. Sent once, unencrypted, during pairing. proof = HMAC-SHA256(key = one-time token, msg = raw phone_pub bytes).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["device_name", "phone_pub", "proof"],
+  "properties": {
+    "device_name": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "phone_pub": { "type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$", "description": "X25519 public key, standard base64 with padding." },
+    "proof": { "type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$" }
+  }
+}

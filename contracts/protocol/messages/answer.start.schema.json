@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/messages/answer.start.schema.json",
+  "title": "AnswerStart",
+  "description": "PC -> phone. Opens a new answer card; the phone vibrates on its first delta using the urgency pattern.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answer_id", "trigger", "format", "intent", "urgency", "model"],
+  "properties": {
+    "answer_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "trigger": { "enum": ["hotkey", "question", "screen", "timer", "command"] },
+    "format": { "enum": ["cue", "fact", "objection"] },
+    "intent": { "enum": ["pricing", "objection", "technical", "scheduling", "small_talk", "none"] },
+    "urgency": { "enum": ["low", "medium", "high"] },
+    "model": { "type": "string", "minLength": 1, "maxLength": 128 }
+  }
+}

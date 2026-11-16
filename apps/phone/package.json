@@ -1,0 +1,15 @@
+{
+  "name": "@ssc/phone",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Wave 0 placeholder. Owner: W1-PHONE (see Build Sheet).",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run --passWithNoTests"
+  },
+  "devDependencies": {
+    "typescript": "^5",
+    "vitest": "^3"
+  }
+}

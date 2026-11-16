@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/messages/answer.delta.schema.json",
+  "title": "AnswerDelta",
+  "description": "PC -> phone. Batched tokens (every ~50 ms or 32 chars). Append-only.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["answer_id", "block", "text"],
+  "properties": {
+    "answer_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+    "block": { "enum": ["cue", "detail"] },
+    "text": { "type": "string", "minLength": 1, "maxLength": 4096 }
+  }
+}

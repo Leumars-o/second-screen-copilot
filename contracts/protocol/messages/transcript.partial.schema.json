@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/messages/transcript.partial.schema.json",
+  "title": "TranscriptPartial",
+  "description": "PC -> phone. Live transcript line. t0/t1 are PC-clock unix ms.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["speaker", "text", "final", "t0", "t1"],
+  "properties": {
+    "speaker": { "enum": ["me", "them"] },
+    "text": { "type": "string", "maxLength": 4096 },
+    "final": { "type": "boolean" },
+    "t0": { "type": "integer", "minimum": 0 },
+    "t1": { "type": "integer", "minimum": 0 }
+  }
+}

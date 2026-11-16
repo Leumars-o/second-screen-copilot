@@ -1,0 +1,89 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/messages/command.schema.json",
+  "title": "Command",
+  "description": "Phone -> PC. One object shape per action.",
+  "oneOf": [
+    { "type": "object", "additionalProperties": false, "required": ["action", "answer_id"], "properties": { "action": { "const": "pin" }, "answer_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" } } },
+    { "type": "object", "additionalProperties": false, "required": ["action", "answer_id"], "properties": { "action": { "const": "regenerate" }, "answer_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" } } },
+    { "type": "object", "additionalProperties": false, "required": ["action", "answer_id"], "properties": { "action": { "const": "shorter" }, "answer_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" } } },
+    { "type": "object", "additionalProperties": false, "required": ["action", "answer_id"], "properties": { "action": { "const": "number" }, "answer_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" } } },
+    { "type": "object", "additionalProperties": false, "required": ["action", "answer_id"], "properties": { "action": { "const": "expand_all" }, "answer_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" } } },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "text"],
+      "properties": {
+        "action": { "const": "followup" },
+        "answer_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+        "text": { "type": "string", "minLength": 1, "maxLength": 2000 }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "answer_id", "item"],
+      "properties": {
+        "action": { "const": "feedback" },
+        "answer_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+        "item": {
+          "oneOf": [
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "value"],
+              "properties": { "kind": { "const": "rating" }, "value": { "enum": ["up", "down"] } }
+            },
+            {
+              "type": "object", "additionalProperties": false,
+              "required": ["kind", "stage", "delta_ms"],
+              "description": "Phone-side render time: first answer.delta frame received -> first paint. Avoids cross-device clock skew.",
+              "properties": {
+                "kind": { "const": "timing" },
+                "stage": { "const": "phone_rendered" },
+                "delta_ms": { "type": "integer", "minimum": 0, "maximum": 60000 }
+              }
+            }
+          ]
+        }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["action"],
+      "properties": {
+        "action": { "const": "memory.list" },
+        "layer": { "enum": ["about_me", "profile", "contact", "account", "session"] }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "item"],
+      "properties": {
+        "action": { "const": "memory.update" },
+        "item": {
+          "type": "object", "additionalProperties": false,
+          "required": ["layer", "title", "body"],
+          "description": "Omit id to create a new item.",
+          "properties": {
+            "id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+            "layer": { "enum": ["about_me", "profile", "contact", "account", "session"] },
+            "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+            "body": { "type": "string", "maxLength": 20000 }
+          }
+        }
+      }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "id"],
+      "properties": { "action": { "const": "memory.delete" }, "id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" } }
+    },
+    {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "suggestion_id", "accept"],
+      "properties": {
+        "action": { "const": "contact.confirm" },
+        "suggestion_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+        "accept": { "type": "boolean" }
+      }
+    }
+  ]
+}

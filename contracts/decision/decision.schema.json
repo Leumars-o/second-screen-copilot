@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/decision/decision.schema.json",
+  "title": "Decision",
+  "description": "Normalised decision-model result (internal; NOT the provider wire format). Every field carries the model's probability p for the chosen value.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["needs_answer", "intent", "answer_tier", "profile", "urgency"],
+  "$defs": {
+    "p": { "type": "number", "minimum": 0, "maximum": 1 }
+  },
+  "properties": {
+    "needs_answer": { "type": "object", "additionalProperties": false, "required": ["value", "p"], "properties": { "value": { "type": "boolean" }, "p": { "$ref": "#/$defs/p" } } },
+    "intent": { "type": "object", "additionalProperties": false, "required": ["value", "p"], "properties": { "value": { "enum": ["pricing", "objection", "technical", "scheduling", "small_talk", "none"] }, "p": { "$ref": "#/$defs/p" } } },
+    "answer_tier": { "type": "object", "additionalProperties": false, "required": ["value", "p"], "properties": { "value": { "enum": ["fast", "strong", "none"] }, "p": { "$ref": "#/$defs/p" } } },
+    "profile": { "type": "object", "additionalProperties": false, "required": ["value", "p"], "properties": { "value": { "type": "string", "minLength": 1, "maxLength": 64 }, "p": { "$ref": "#/$defs/p" } } },
+    "urgency": { "type": "object", "additionalProperties": false, "required": ["value", "p"], "properties": { "value": { "enum": ["low", "medium", "high"] }, "p": { "$ref": "#/$defs/p" } } }
+  }
+}

@@ -1,0 +1,16 @@
+{
+  "v": 1,
+  "type": "command",
+  "seq": 1,
+  "ts": 1763290000123,
+  "session_id": null,
+  "payload": {
+    "action": "memory.update",
+    "item": {
+      "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+      "layer": "contact",
+      "title": "Ada (Acme)",
+      "body": "Cares about SSO"
+    }
+  }
+}

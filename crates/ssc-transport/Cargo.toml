@@ -1,0 +1,12 @@
+[package]
+name = "ssc-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+ssc-core.workspace = true
+
+[lints]
+workspace = true

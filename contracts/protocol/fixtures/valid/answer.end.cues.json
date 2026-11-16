@@ -1,0 +1,24 @@
+{
+  "v": 1,
+  "type": "answer.end",
+  "seq": 1,
+  "ts": 1763290000123,
+  "session_id": "3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d",
+  "payload": {
+    "answer_id": "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d",
+    "reason": "done",
+    "cues": [
+      {
+        "text": "Requirements",
+        "expand": "Interview users first."
+      },
+      {
+        "text": "Design"
+      },
+      {
+        "text": "Build"
+      }
+    ],
+    "not_in_docs": false
+  }
+}

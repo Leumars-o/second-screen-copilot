@@ -1,0 +1,18 @@
+{
+  "v": 1,
+  "type": "memory.snapshot",
+  "seq": 1,
+  "ts": 1763290000123,
+  "session_id": null,
+  "payload": {
+    "items": [
+      {
+        "id": "7c9e6679-7425-40de-944b-e07fc1f90ae7",
+        "layer": "profile",
+        "title": "Sales: product X",
+        "body": "Lead with ROI.",
+        "updated_at": 1763290000123
+      }
+    ]
+  }
+}

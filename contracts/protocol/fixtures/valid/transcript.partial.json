@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "type": "transcript.partial",
+  "seq": 1,
+  "ts": 1763290000123,
+  "session_id": "3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d",
+  "payload": {
+    "speaker": "them",
+    "text": "how much does the enterprise plan",
+    "final": false,
+    "t0": 1763290000000,
+    "t1": 1763290001200
+  }
+}

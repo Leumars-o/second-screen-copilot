@@ -1,0 +1,36 @@
+{
+  "description": "Frozen with contracts-v1. See README.md for the algorithm. Keys are test-only.",
+  "pc_priv_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "pc_pub_hex": "07a37cbc142093c8b755dc1b10e86cb426374ad16aa853ed0bdfc0b2b86d1c7c",
+  "pc_pub_b64": "B6N8vBQgk8i3VdwbEOhstCY3StFqqFPtC9/AsrhtHHw=",
+  "phone_priv_hex": "65666768696a6b6c6d6e6f707172737475767778797a7b7c7d7e7f8081828384",
+  "phone_pub_hex": "5714769d116bf76436ae74bc793d2c30ad1903c59ac5273805c7e2698b410c36",
+  "phone_pub_b64": "VxR2nRFr92Q2rnS8eT0sMK0ZA8WaxSc4BcfiaYtBDDY=",
+  "token_hex": "c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedfe0e1e2e3e4e5e6e7",
+  "token_b64": "yMnKy8zNzs/Q0dLT1NXW19jZ2tvc3d7f4OHi4+Tl5uc=",
+  "shared_hex": "c9ea6a3f79a000b60b076d4afc990b272f3f0b5aaa3f0b8713c209273e363863",
+  "key_pc_to_phone_hex": "c8c450aad53d131960d48a9ba642a231348d6b55dfdd4aa89b1c734c88748bac",
+  "key_phone_to_pc_hex": "2eec04d8f18ed01c380ff89ca666a4f8a3d53819118094bb6ed3d4bf5a53f304",
+  "room_id_hex": "42820c9fc7ad02737ae7dacc15a76d09",
+  "proof_b64": "l+l1OyWmQOZTMG0XuWN79FxJWc1kx6JAzmytCMJ990s=",
+  "frames": [
+    {
+      "key": "pc->phone",
+      "session_id": "3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d",
+      "seq": 7,
+      "nonce_hex": "000102030405060708090a0b0c0d0e0f1011121314151617",
+      "aad_hex": "33663262386331652d396134642d346537622d386332312d3564366637613862396330640000000000000007",
+      "plaintext": "{\"v\":1,\"type\":\"answer.delta\",\"seq\":7,\"ts\":1763290000123,\"session_id\":\"3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d\",\"payload\":{\"answer_id\":\"a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d\",\"block\":\"cue\",\"text\":\"1. Requirements\"}}",
+      "wire_b64": "AQABAgMEBQYHCAkKCwwNDg8QERITFBUWF/VQ+1KM8ArmAMwHyc60UunAg9cIbbmSFBx1ETvnAbJyBMGQTkaxJDUqzXfF58gFqaW/f6EKLVUHaGUamsav5QzQHoy+0XsTdQ+pSQgmiuCjw18xewmRlrAZ0RqpY1vmWer8hIW5SnL3o3vPct9dXu71bq4Z0QlQZ7AneKLVP29USOYQOIaq/UasKL63/PUzGvBKfTkm8u6BBsd3EtysujSiHeP5ZjsWmflKwY7EmI3UU827sUHX8cr0J3pwVaICL+p8m7eVvg/+Fxcj/GbxJErsFptaqhom0Ed2hrbpnF+AvdY="
+    },
+    {
+      "key": "phone->pc",
+      "session_id": "3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d",
+      "seq": 3,
+      "nonce_hex": "18191a1b1c1d1e1f202122232425262728292a2b2c2d2e2f",
+      "aad_hex": "33663262386331652d396134642d346537622d386332312d3564366637613862396330640000000000000003",
+      "plaintext": "{\"v\":1,\"type\":\"heartbeat\",\"seq\":3,\"ts\":1763290000999,\"session_id\":\"3f2b8c1e-9a4d-4e7b-8c21-5d6f7a8b9c0d\",\"payload\":{}}",
+      "wire_b64": "ARgZGhscHR4fICEiIyQlJicoKSorLC0uL5Ey+eDU3uE+PT1CKob7qArEax2lyVrSKe53GWIOz8G9YAXmY3T+Obpg1QBmLx9HUAKaxLGCVf9jSl5kSJMEjWiLhngkyZfQMFIAwrB7CqCmJup2TU1FVlG3AQA7AuqhhVpuAqJCrqPqFTYgQOd7O7MdlrdwtjjXcK0vMWSMAJK1VxlTVRWl"
+    }
+  ]
+}

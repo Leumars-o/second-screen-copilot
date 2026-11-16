@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/envelope.schema.json",
+  "title": "Envelope",
+  "description": "Plaintext frame inside the encryption. The payload is validated separately against messages/<type>.schema.json.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "type", "seq", "ts", "session_id", "payload"],
+  "properties": {
+    "v": { "const": 1 },
+    "type": {
+      "enum": [
+        "pair.hello", "session.start", "session.end",
+        "answer.start", "answer.delta", "answer.end",
+        "transcript.partial", "command", "heartbeat",
+        "session.summary", "memory.snapshot"
+      ]
+    },
+    "seq": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+    "ts": { "type": "integer", "minimum": 0, "description": "Sender clock, unix ms." },
+    "session_id": {
+      "description": "Active session, or null when none is active.",
+      "oneOf": [
+        { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+        { "type": "null" }
+      ]
+    },
+    "payload": { "type": "object" }
+  }
+}

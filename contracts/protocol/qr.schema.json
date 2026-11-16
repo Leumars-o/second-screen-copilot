@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/qr.schema.json",
+  "title": "QrPayload",
+  "description": "Pairing QR code contents. See contracts/crypto/README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["v", "urls", "pc_pub", "token", "exp"],
+  "properties": {
+    "v": { "const": 1 },
+    "urls": {
+      "type": "array", "minItems": 1, "maxItems": 4,
+      "items": { "type": "string", "pattern": "^wss?://[^\\s]+$", "maxLength": 512 }
+    },
+    "pc_pub": { "type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$" },
+    "token": { "type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$" },
+    "exp": { "type": "integer", "minimum": 0 }
+  }
+}

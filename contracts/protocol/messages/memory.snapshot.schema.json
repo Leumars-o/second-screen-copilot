@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/messages/memory.snapshot.schema.json",
+  "title": "MemorySnapshot",
+  "description": "PC -> phone, in reply to command memory.list and after every memory change. Addition to spec v1 (Build Sheet §10).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["items"],
+  "properties": {
+    "items": {
+      "type": "array",
+      "maxItems": 5000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "layer", "title", "body", "updated_at"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" },
+          "layer": { "enum": ["about_me", "profile", "contact", "account", "session"] },
+          "title": { "type": "string", "minLength": 1, "maxLength": 200 },
+          "body": { "type": "string", "maxLength": 20000 },
+          "updated_at": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  }
+}

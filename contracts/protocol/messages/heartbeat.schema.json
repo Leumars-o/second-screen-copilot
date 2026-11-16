@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/messages/heartbeat.schema.json",
+  "title": "Heartbeat",
+  "description": "Both directions, every 5 s; the link is dead after 15 s without one. echo = the ts of the peer heartbeat being answered, used to measure round-trip time.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "echo": { "type": "integer", "minimum": 0 }
+  }
+}
