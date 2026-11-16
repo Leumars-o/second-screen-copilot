@@ -1,7 +1,7 @@
 import { env, runDurableObjectAlarm, runInDurableObject, SELF } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 import type { RelayRoom } from "../src/index";
-import { MAX_FRAME_BYTES } from "../src/frame";
+import { MAX_FRAME_BYTES, MAX_PAIR_HELLO_BYTES } from "../src/frame";
 
 let roomCounter = 0;
 function newRoomId(): string {
@@ -112,6 +112,22 @@ describe("relaying", () => {
     expect(b.received.length).toBe(1);
   });
 
+  it("forwards 0x00 pair.hello frames byte for byte", async () => {
+    const room = newRoomId();
+    const a = await connect(room);
+    const b = await connect(room);
+    const json = new TextEncoder().encode('{"v":1,"type":"pair.hello","seq":0}');
+    const hello = new Uint8Array(1 + json.length);
+    hello[0] = 0x00;
+    hello.set(json, 1);
+    b.ws.send(hello.buffer);
+    const max = frame(MAX_PAIR_HELLO_BYTES, 0x7b, 0x00);
+    b.ws.send(max);
+    await until(() => a.received.length === 2);
+    expect(bytes(a.received[0])).toEqual(Array.from(hello));
+    expect(bytes(a.received[1])).toEqual(bytes(max));
+  });
+
   it("rejects a third client with 409", async () => {
     const room = newRoomId();
     await connect(room);
@@ -129,7 +145,9 @@ describe("relaying", () => {
     a.ws.send(frame(MAX_FRAME_BYTES + 1, 0x11));
     a.ws.send(frame(40, 0x22));
     a.ws.send(frame(100, 0x33, 0x02));
-    a.ws.send(frame(100, 0x44, 0x00));
+    a.ws.send(frame(100, 0x44, 0xff));
+    a.ws.send(frame(MAX_PAIR_HELLO_BYTES + 1, 0x45, 0x00)); // pair.hello over 2 KB
+    a.ws.send(frame(1, 0x46, 0x00)); // pair.hello with no body
     const ok = frame(64, 0x55);
     a.ws.send(ok); // marker: ordering on one socket means everything before it was processed
     await until(() => b.received.length >= 1);

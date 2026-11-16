@@ -20,4 +20,4 @@ Format:
 - Proposed diff (pick one):
   1. `contracts/crypto/README.md`: "`pair.hello` is sent as a binary frame `0x00 || envelope JSON (UTF-8)`; every other frame uses version `0x01`." The relay then also forwards version `0x00` frames (same 64 KB / rate limits). Small relay change, owned by W1-RELAY.
   2. Or state explicitly that pairing is LAN-only and the relay URL in the QR is for later sessions only.
-- Status: open
+- Status: accepted (contracts-v1.1)

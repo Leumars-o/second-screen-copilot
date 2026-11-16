@@ -4,6 +4,7 @@ import {
   DEFAULT_LIMITS,
   limitsFromEnv,
   MAX_FRAME_BYTES,
+  MAX_PAIR_HELLO_BYTES,
   MIN_FRAME_BYTES,
   ROOM_PATH,
   TokenBucket,
@@ -26,7 +27,14 @@ describe("checkFrame", () => {
     expect(checkFrame(frame(MIN_FRAME_BYTES - 1))).toBe("too_small");
     expect(checkFrame(frame(0))).toBe("too_small");
     expect(checkFrame(frame(100, 0x02))).toBe("bad_version");
-    expect(checkFrame(frame(100, 0x00))).toBe("bad_version");
+    expect(checkFrame(frame(100, 0xff))).toBe("bad_version");
+    expect(checkFrame(frame(MAX_PAIR_HELLO_BYTES, 0x02))).toBe("bad_version");
+  });
+  it("accepts 0x00 pair.hello frames from 2 bytes up to 2 KB", () => {
+    expect(checkFrame(frame(2, 0x00))).toBeNull();
+    expect(checkFrame(frame(MAX_PAIR_HELLO_BYTES, 0x00))).toBeNull();
+    expect(checkFrame(frame(1, 0x00))).toBe("too_small");
+    expect(checkFrame(frame(MAX_PAIR_HELLO_BYTES + 1, 0x00))).toBe("too_large");
   });
 });
 
