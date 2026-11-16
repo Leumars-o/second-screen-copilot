@@ -1457,7 +1457,11 @@ dependencies = [
 name = "ssc-trigger"
 version = "0.1.0"
 dependencies = [
+ "serde",
  "ssc-core",
+ "tokio",
+ "tokio-util",
+ "uuid",
 ]
 
 [[package]]
