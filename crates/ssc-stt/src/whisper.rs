@@ -163,6 +163,9 @@ async fn run_speaker(
         let mut ended: Option<u64> = None;
         let mut closed = false;
         tokio::select! {
+            // Biased: queued audio is always read before the silence tick. Otherwise time spent in a
+            // slow partial transcription (> silence_ms) looks like an audio gap and splits the utterance.
+            biased;
             _ = cancel.cancelled() => return,
             c = audio.recv() => match c {
                 Some(chunk) if chunk.speaker == speaker => {
