@@ -16,6 +16,8 @@ live = []
 [dependencies]
 ssc-core.workspace = true
 ssc-audio = { path = "../ssc-audio" }
+# Only for `ssc_memory::download` (model fetcher); no cycle: ssc-memory depends on ssc-core only.
+ssc-memory = { path = "../ssc-memory" }
 tokio = { workspace = true, features = ["net"] }
 tokio-util.workspace = true
 serde.workspace = true

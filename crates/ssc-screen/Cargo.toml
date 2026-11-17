@@ -18,6 +18,9 @@ windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Graphics_Gd
 accessibility-sys = "0.2"
 core-foundation = "0.10"
 objc2 = "0.6"
+# Same pin as ssc-audio (newer versions pull apple-metal, which fails to build here).
+# `macos_15_2` enables SCScreenshotManager.captureImage(in:) (checked at runtime too).
+screencapturekit = { version = "2.1", features = ["macos_15_2"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSError", "NSString", "NSObject", "NSEnumerator"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFData", "CFCGTypes"] }
 objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGBase", "CGBitmapContext", "CGColorSpace", "CGContext", "CGDataProvider", "CGGeometry", "CGImage", "CGWindow"] }

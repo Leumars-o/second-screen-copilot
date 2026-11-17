@@ -60,11 +60,13 @@ fn recall_at_5_mock_embedder() {
     assert!(recall >= 0.8, "recall@5 = {recall:.3}; misses:\n{}", misses.join("\n"));
 }
 
-#[cfg(feature = "fastembed")]
+/// Downloads bge-small-en-v1.5 (~130 MB, once) into `~/.ssc/models`. `--features live` only.
+#[cfg(feature = "live")]
 #[test]
-#[ignore = "downloads bge-small-en-v1.5 (~130 MB) on first run; run with --features fastembed -- --ignored"]
 fn recall_at_5_bge_small() {
-    let e = ssc_memory::embed::FastEmbedder::new(None).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let dir = rt.block_on(ssc_memory::models::ensure_embedder(&|_| {})).unwrap();
+    let e = ssc_memory::embed::FastEmbedder::from_dir(&dir).unwrap();
     let (recall, misses) = recall_at_5(Arc::new(e));
     println!("recall@5 (bge-small-en-v1.5) = {recall:.3}");
     for m in &misses {

@@ -1,8 +1,8 @@
-//! macOS backend: AXUIElement tree walk, CoreGraphics window capture, Apple Vision OCR.
+//! macOS backend: AXUIElement tree walk, ScreenCaptureKit capture, Apple Vision OCR.
 //!
 //! Needs the Accessibility permission (AX) and, for OCR only, Screen Recording. Without them the
 //! calls return [`SscError::Unavailable`]; nothing here prompts the user.
-#![allow(unsafe_code)] // FFI to ApplicationServices, CoreGraphics and Vision.
+#![allow(unsafe_code)] // FFI to ApplicationServices, CoreGraphics, ScreenCaptureKit and Vision.
 
 use crate::ocr::{Frame, FrameSource, OcrEngine, OcrLine, PxRect};
 use crate::reader::{AxBackend, WindowRead};
@@ -245,7 +245,7 @@ impl AxBackend for AxReader {
     }
 }
 
-// ---------- capture (CoreGraphics) ----------
+// ---------- capture (ScreenCaptureKit; CoreGraphics kept for comparison) ----------
 
 use objc2_core_foundation::{CFData, CGPoint, CGRect, CGSize};
 #[allow(deprecated)] // CGWindowListCreateImage, see CgCapture.
@@ -254,21 +254,76 @@ use objc2_core_graphics::{
     CGImageAlphaInfo, CGPreflightScreenCaptureAccess, CGWindowImageOption, CGWindowListCreateImage, CGWindowListOption,
     kCGNullWindowID,
 };
+use screencapturekit::screenshot_manager::SCScreenshotManager;
 
-/// Captures a screen rectangle with `CGWindowListCreateImage` (needs Screen Recording).
+fn check_capture_access(window: Rect) -> Result<()> {
+    if window.w <= 0 || window.h <= 0 {
+        return Err(SscError::Invalid(format!("empty capture rect {window:?}")));
+    }
+    if !CGPreflightScreenCaptureAccess() {
+        return Err(SscError::Unavailable("macOS Screen Recording permission not granted".into()));
+    }
+    Ok(())
+}
+
+/// Renders any `CGImage` into an 8-bit gray buffer we own (`width * height` bytes, row-major,
+/// top row first). CoreGraphics converts whatever the source format is (BGRA from
+/// ScreenCaptureKit, the display's format from CGWindowList) with colour management.
+fn cgimage_to_gray(img: &CGImage) -> Result<(u32, u32, Vec<u8>)> {
+    let (w, h) = (CGImage::width(Some(img)), CGImage::height(Some(img)));
+    if w == 0 || h == 0 {
+        return Err(SscError::Unavailable("empty capture".into()));
+    }
+    let (Ok(w32), Ok(h32)) = (u32::try_from(w), u32::try_from(h)) else {
+        return Err(SscError::Invalid("capture too large".into()));
+    };
+    let mut gray = vec![0u8; w * h];
+    let cs = CGColorSpace::new_device_gray();
+    // SAFETY: `gray` is w*h bytes, bytes_per_row = w, 8 bpc gray, no alpha; it outlives the context.
+    let ctx =
+        unsafe { CGBitmapContextCreate(gray.as_mut_ptr().cast(), w, h, 8, w, cs.as_deref(), CGImageAlphaInfo::None.0) }
+            .ok_or_else(|| SscError::Unavailable("CGBitmapContextCreate failed".into()))?;
+    let full = CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: w as f64, height: h as f64 } };
+    CGContext::draw_image(Some(&ctx), full, Some(img));
+    drop(ctx);
+    Ok((w32, h32, gray))
+}
+
+/// Captures a screen rectangle with ScreenCaptureKit (`SCScreenshotManager.captureImage(in:)`,
+/// macOS 15.2+). Needs Screen Recording, the same permission `ssc-audio` uses for system audio.
+/// The rect is in global display points, like accessibility bounds; the image comes back at the
+/// display's backing scale (2x on Retina).
+pub struct SckCapture;
+
+impl FrameSource for SckCapture {
+    fn capture(&self, window: Rect) -> Result<Frame> {
+        check_capture_access(window)?;
+        let rect =
+            screencapturekit::cg::CGRect::new(window.x.into(), window.y.into(), window.w.into(), window.h.into());
+        let img = SCScreenshotManager::capture_image_in_rect(rect)
+            .map_err(|e| SscError::Unavailable(format!("ScreenCaptureKit capture failed: {e}")))?;
+        if img.as_ptr().is_null() {
+            return Err(SscError::Unavailable("ScreenCaptureKit returned no image".into()));
+        }
+        // SAFETY: `as_ptr` is a live, retained CGImageRef owned by `img`, which outlives `cg`.
+        let cg: &CGImage = unsafe { &*img.as_ptr().cast::<CGImage>() };
+        let (width, height, gray) = cgimage_to_gray(cg)?;
+        Ok(Frame { screen: window, width, height, gray })
+    }
+}
+
+/// Captures a screen rectangle with the deprecated `CGWindowListCreateImage`. Not used by
+/// [`crate::platform_reader`] (which uses [`SckCapture`]); kept for the side-by-side
+/// measurement in `real_capture_compare` and as a fallback should SCK regress.
 pub struct CgCapture;
 
 impl FrameSource for CgCapture {
     fn capture(&self, window: Rect) -> Result<Frame> {
-        if !CGPreflightScreenCaptureAccess() {
-            return Err(SscError::Unavailable("macOS Screen Recording permission not granted".into()));
-        }
+        check_capture_access(window)?;
         let rect = CGRect {
             origin: CGPoint { x: window.x.into(), y: window.y.into() },
             size: CGSize { width: window.w.into(), height: window.h.into() },
         };
-        // Deprecated in favour of ScreenCaptureKit (async, macOS 14+); still functional and far
-        // simpler for one synchronous grab.
         #[allow(deprecated)]
         let img = CGWindowListCreateImage(
             rect,
@@ -277,22 +332,8 @@ impl FrameSource for CgCapture {
             CGWindowImageOption::Default,
         )
         .ok_or_else(|| SscError::Unavailable("CGWindowListCreateImage returned null".into()))?;
-        let (w, h) = (CGImage::width(Some(&img)), CGImage::height(Some(&img)));
-        if w == 0 || h == 0 {
-            return Err(SscError::Unavailable("empty capture".into()));
-        }
-        // Draw into an 8-bit gray bitmap we own: CoreGraphics converts whatever the source format is.
-        let mut gray = vec![0u8; w * h];
-        let cs = CGColorSpace::new_device_gray();
-        // SAFETY: `gray` is w*h bytes, bytes_per_row = w, 8 bpc gray, no alpha; it outlives the context.
-        let ctx = unsafe {
-            CGBitmapContextCreate(gray.as_mut_ptr().cast(), w, h, 8, w, cs.as_deref(), CGImageAlphaInfo::None.0)
-        }
-        .ok_or_else(|| SscError::Unavailable("CGBitmapContextCreate failed".into()))?;
-        let full = CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: w as f64, height: h as f64 } };
-        CGContext::draw_image(Some(&ctx), full, Some(&img));
-        drop(ctx);
-        Ok(Frame { screen: window, width: w as u32, height: h as u32, gray })
+        let (width, height, gray) = cgimage_to_gray(&img)?;
+        Ok(Frame { screen: window, width, height, gray })
     }
 }
 
@@ -381,6 +422,114 @@ mod tests {
     #[test]
     fn vision_rejects_bad_sizes() {
         assert!(VisionOcr.recognize(&[0u8; 10], 10, 10).is_err());
+    }
+
+    /// The conversion both capture paths share: a gray image round-trips byte for byte, with the
+    /// top row first (CoreGraphics bitmap contexts are bottom-up in user space).
+    #[test]
+    fn cgimage_to_gray_round_trips_and_keeps_row_order() {
+        let (w, h) = (7u32, 5u32);
+        let src: Vec<u8> = (0..w * h).map(|i| (i * 7 % 256) as u8).collect();
+        let img = gray_image(&src, w, h).unwrap();
+        let (gw, gh, gray) = cgimage_to_gray(&img).unwrap();
+        assert_eq!((gw, gh), (w, h));
+        assert_eq!(gray, src);
+    }
+
+    /// RGBA input (the shape ScreenCaptureKit hands back) is reduced to luminance: white stays
+    /// white, black stays black, and pure green is brighter than pure blue.
+    #[test]
+    fn cgimage_to_gray_converts_colour() {
+        let px: [[u8; 4]; 4] = [[255, 255, 255, 255], [0, 0, 0, 255], [0, 255, 0, 255], [0, 0, 255, 255]];
+        let bytes: Vec<u8> = px.iter().flatten().copied().collect();
+        let data = CFData::from_bytes(&bytes);
+        let provider = CGDataProvider::with_cf_data(Some(&data)).unwrap();
+        let cs = CGColorSpace::new_device_rgb().unwrap();
+        // SAFETY: 4x1 RGBA, 8 bpc, 32 bpp, 16 bytes per row; decode is null.
+        let img = unsafe {
+            CGImage::new(
+                4,
+                1,
+                8,
+                32,
+                16,
+                Some(&cs),
+                CGBitmapInfo(CGImageAlphaInfo::NoneSkipLast.0),
+                Some(&provider),
+                std::ptr::null(),
+                false,
+                CGColorRenderingIntent::RenderingIntentDefault,
+            )
+        }
+        .unwrap();
+        let (w, h, g) = cgimage_to_gray(&img).unwrap();
+        assert_eq!((w, h), (4, 1));
+        assert!(g[0] > 250, "white -> {}", g[0]);
+        assert!(g[1] < 5, "black -> {}", g[1]);
+        assert!(g[2] > g[3], "green {} should be brighter than blue {}", g[2], g[3]);
+    }
+
+    #[test]
+    fn capture_rejects_empty_rect() {
+        let r = Rect { x: 0, y: 0, w: 0, h: 10 };
+        assert!(matches!(SckCapture.capture(r), Err(SscError::Invalid(_))));
+        assert!(matches!(CgCapture.capture(r), Err(SscError::Invalid(_))));
+    }
+
+    /// CPU time (user + system) of this process so far.
+    fn cpu_time() -> std::time::Duration {
+        // SAFETY: getrusage fills a zeroed struct.
+        let mut ru: libc_rusage::rusage = unsafe { std::mem::zeroed() };
+        unsafe { libc_rusage::getrusage(0, &mut ru) };
+        let tv = |t: libc_rusage::timeval| {
+            std::time::Duration::from_secs(t.tv_sec as u64) + std::time::Duration::from_micros(t.tv_usec as u64)
+        };
+        tv(ru.ru_utime) + tv(ru.ru_stime)
+    }
+
+    /// Minimal getrusage binding (avoids a libc dependency for one manual test).
+    mod libc_rusage {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct timeval {
+            pub tv_sec: i64,
+            pub tv_usec: i32,
+        }
+        #[repr(C)]
+        pub struct rusage {
+            pub ru_utime: timeval,
+            pub ru_stime: timeval,
+            pub rest: [i64; 14],
+        }
+        unsafe extern "C" {
+            pub fn getrusage(who: i32, usage: *mut rusage) -> i32;
+        }
+    }
+
+    /// *Manual*: needs Screen Recording for the terminal running the test. Captures the same
+    /// 1200x800-point region with ScreenCaptureKit and with CGWindowListCreateImage and prints
+    /// wall time and process CPU time per capture (incl. gray conversion). Run with
+    /// `cargo test -p ssc-screen --release -- --ignored --nocapture real_capture_compare`.
+    #[test]
+    #[ignore = "manual: needs macOS Screen Recording permission"]
+    fn real_capture_compare() {
+        assert!(CGPreflightScreenCaptureAccess(), "grant Screen Recording to the terminal running the test");
+        let rect = Rect { x: 0, y: 0, w: 1200, h: 800 };
+        let sources: [(&str, &dyn FrameSource); 2] = [("sck", &SckCapture), ("cg", &CgCapture)];
+        for (name, src) in sources {
+            let t = std::time::Instant::now();
+            let first = src.capture(rect).unwrap();
+            eprintln!("{name}: first capture {:?} -> {}x{}", t.elapsed(), first.width, first.height);
+            assert!(first.width >= 1200 && first.height >= 800);
+            assert!(first.gray.iter().any(|&b| b != first.gray[0]), "{name}: frame is uniform (permission?)");
+            let n = 10;
+            let (c0, t0) = (cpu_time(), std::time::Instant::now());
+            for _ in 0..n {
+                src.capture(rect).unwrap();
+            }
+            let (wall, cpu) = (t0.elapsed() / n, (cpu_time() - c0) / n);
+            eprintln!("{name}: steady state per capture: wall {wall:?}, process cpu {cpu:?}");
+        }
     }
 
     /// *Manual*: needs the Accessibility (and for OCR, Screen Recording) permission and a real

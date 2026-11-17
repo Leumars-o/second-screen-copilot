@@ -6,7 +6,7 @@
 //! - [`ocr`]: change detection and OCR merging on changed regions only.
 //! - [`reader`]: [`ScreenReader`], the [`ScreenSource`] that ties them together.
 //! - Platform backends: `windows_backend` (UI Automation, GDI capture, Windows.Media.Ocr) and `macos`
-//!   (AXUIElement, CoreGraphics capture, Apple Vision). [`platform_reader`] picks the right one.
+//!   (AXUIElement, ScreenCaptureKit capture, Apple Vision). [`platform_reader`] picks the right one.
 //!
 //! Screen text is untrusted data (Build Sheet §3.8): this crate only reads it.
 
@@ -32,7 +32,7 @@ pub fn platform_reader() -> Result<ScreenReader> {
     #[cfg(target_os = "macos")]
     {
         Ok(ScreenReader::new(Box::new(macos::AxReader::new()))
-            .with_ocr(Box::new(macos::CgCapture), Box::new(macos::VisionOcr)))
+            .with_ocr(Box::new(macos::SckCapture), Box::new(macos::VisionOcr)))
     }
     #[cfg(target_os = "windows")]
     {

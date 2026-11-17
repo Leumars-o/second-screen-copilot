@@ -8,14 +8,18 @@
 //! - Contact suggestions wait in `pending_contact_suggestions` until confirmed; transcripts are
 //!   stored only when `keep_transcripts` is on. No raw audio or images are ever stored.
 //!
-//! The real embedder (bge-small-en-v1.5 via `fastembed`) is behind the `fastembed` feature.
+//! The real embedder (bge-small-en-v1.5 via `fastembed`) is behind the `fastembed` feature. Its
+//! files are fetched by [`download`] / [`models::ensure_embedder`] (pinned, SHA-256 checked);
+//! `ssc-stt` uses the same downloader for the whisper model.
 
 mod db;
+pub mod download;
 #[cfg(feature = "fastembed")]
 pub mod embed;
 mod index;
 pub mod ingest;
 pub mod items;
+pub mod models;
 mod session;
 mod store;
 

@@ -1,6 +1,7 @@
 //! Acceptance: whisper adapter on a fixture WAV. Feature `local-stt` only (not in the gate).
 //! Needs a ggml model: set `SSC_WHISPER_MODEL=/path/to/ggml-tiny.en.bin`
-//! (https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin).
+//! (https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-tiny.en.bin). The app itself
+//! uses `ssc_stt::models::ensure_whisper`, which pins ggml-large-v3-turbo.
 #![cfg(feature = "local-stt")]
 
 use ssc_core::protocol::Speaker;
