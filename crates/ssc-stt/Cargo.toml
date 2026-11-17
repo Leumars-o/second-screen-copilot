@@ -9,7 +9,8 @@ description = "Streaming speech-to-text: Deepgram (cloud) and whisper.cpp (local
 [features]
 default = []
 # whisper.cpp via whisper-rs. Needs cmake + a C++ toolchain; not built by the default gate.
-local-stt = ["dep:whisper-rs"]
+# Metal: whisper.cpp runs the encoder on the Apple GPU (not on by default in whisper-rs).
+local-stt = ["dep:whisper-rs", "whisper-rs/metal"]
 # Tests that call real providers (Deepgram key in the OS keychain). Skipped by the gate.
 live = []
 

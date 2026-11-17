@@ -9,6 +9,7 @@ use ssc_memory::download::{HF_BASE_URL, ModelSpec};
 fn specs() -> Vec<(&'static str, ModelSpec)> {
     vec![
         ("bge-small-en-v1.5", ssc_memory::models::BGE_SMALL_EN_V15),
+        ("whisper small.en", ssc_stt::models::WHISPER_SMALL_EN),
         ("whisper large-v3-turbo", ssc_stt::models::WHISPER_LARGE_V3_TURBO),
     ]
 }
