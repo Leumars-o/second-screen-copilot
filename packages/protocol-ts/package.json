@@ -3,13 +3,30 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Wave 0 placeholder. Owner: W1-PHONE (see Build Sheet).",
+  "description": "Second Screen Copilot wire protocol: types generated from contracts/protocol, Ajv validation, envelope codec, crypto client, pairing, phone link and a mock PC server.",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "exports": {
+    ".": "./src/index.ts"
+  },
   "scripts": {
+    "generate": "tsx scripts/generate.ts",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run",
+    "mock-server": "tsx mock-server/cli.ts"
   },
   "devDependencies": {
+    "@types/libsodium-wrappers": "^0.8.2",
+    "@types/node": "^26.6.6",
+    "@types/ws": "^8.18.2",
+    "json-schema-to-typescript": "^16.0.0",
+    "tsx": "^4.23.15",
     "typescript": "^5",
-    "vitest": "^3"
+    "vitest": "^3",
+    "ws": "^8.23.0"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0",
+    "libsodium-wrappers": "^0.8.4"
   }
 }

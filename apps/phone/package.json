@@ -3,13 +3,32 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Wave 0 placeholder. Owner: W1-PHONE (see Build Sheet).",
+  "description": "Second Screen Copilot phone PWA (Next.js static export).",
   "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "mock": "tsx ../../packages/protocol-ts/mock-server/cli.ts --port 4710 --static out",
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run && pnpm run e2e",
+    "test:unit": "vitest run",
+    "e2e": "playwright install chromium && next build && playwright test"
   },
   "devDependencies": {
+    "@playwright/test": "1.57.0",
+    "@types/node": "^26.6.6",
+    "@types/react": "^19.3.0",
+    "@types/react-dom": "^19.3.0",
+    "jsdom": "^26.1.0",
+    "tsx": "^4.23.15",
     "typescript": "^5",
     "vitest": "^3"
+  },
+  "dependencies": {
+    "@ssc/protocol": "workspace:*",
+    "@zxing/browser": "^0.2.1",
+    "@zxing/library": "^0.23.0",
+    "next": "^16.4.6",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
   }
 }
