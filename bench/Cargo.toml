@@ -23,6 +23,7 @@ ssc-router = { path = "../crates/ssc-router" }
 ssc-context = { path = "../crates/ssc-context" }
 ssc-stt = { path = "../crates/ssc-stt" }
 ssc-audio = { path = "../crates/ssc-audio" }
+ssc-pipeline = { path = "../crates/ssc-pipeline" }
 serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true

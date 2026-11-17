@@ -4,9 +4,38 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Wires capture → diff → trigger → context → route → push → commands → store → follow-up (W2-INTEGRATE)."
+
+[features]
+# whisper.cpp for local-only speech-to-text (needs cmake). The agent turns this on.
+local-stt = ["ssc-stt/local-stt"]
+# bge-small-en-v1.5 embedder through fastembed/ONNX Runtime.
+fastembed = ["ssc-memory/fastembed"]
 
 [dependencies]
 ssc-core.workspace = true
+ssc-audio = { path = "../ssc-audio" }
+ssc-stt = { path = "../ssc-stt" }
+ssc-screen = { path = "../ssc-screen" }
+ssc-trigger = { path = "../ssc-trigger" }
+ssc-context = { path = "../ssc-context" }
+ssc-memory = { path = "../ssc-memory" }
+ssc-router = { path = "../ssc-router" }
+ssc-redact = { path = "../ssc-redact" }
+ssc-crypto = { path = "../ssc-crypto" }
+ssc-transport = { path = "../ssc-transport" }
+serde.workspace = true
+serde_json.workspace = true
+anyhow.workspace = true
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio-util.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "net", "io-util", "process"] }
+tokio-tungstenite = "0.30"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [lints]
 workspace = true

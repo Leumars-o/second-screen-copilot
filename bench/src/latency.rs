@@ -166,14 +166,34 @@ impl PipelineDriver for MockPipeline {
     }
 }
 
-/// INTEGRATION POINT (W2-INTEGRATE): return the real `ssc-pipeline` driver here once it exposes
-/// a replay entry point (fixture audio + screen snapshots in, `Timing` events out). Everything
-/// else in this harness (JSONL, stats, report, thresholds) already runs on real timing files.
+/// The real `ssc-pipeline` (W2-INTEGRATE): `~/.ssc/config.toml` + keychain keys, real decision and
+/// answer models, the user's memory store. Each fixture question is played as a final "them"
+/// utterance (`ssc_pipeline::replay`); STT and the phone are stand-ins, so `speech_end →
+/// transcript_final` is ~0 and `phone_rendered` uses the fixture's `phone_delta_ms`.
 pub fn real_pipeline() -> Result<Arc<dyn PipelineDriver>> {
-    anyhow::bail!(
-        "the real pipeline is not wired into bench/latency yet (W2-INTEGRATE). Meanwhile run the agent \
-         and analyse its timing log: `ssc-bench latency --jsonl ~/.ssc/timing/<date>.jsonl --mode cloud --enforce`"
-    )
+    Ok(Arc::new(RealPipeline))
+}
+
+struct RealPipeline;
+
+#[async_trait]
+impl PipelineDriver for RealPipeline {
+    fn name(&self) -> &str {
+        "real ssc-pipeline (config + keychain models; scripted transcript)"
+    }
+
+    async fn replay(&self, call: &FixtureCall, timing: &Timing) -> Result<()> {
+        let mut cfg = ssc_core::config::Config::load(&ssc_core::config::Config::default_path())?;
+        cfg.mode = match call.mode {
+            RunMode::Cloud => ssc_core::protocol::Mode::Cloud,
+            RunMode::Local => ssc_core::protocol::Mode::Local,
+        };
+        let questions: Vec<String> = call.utterances.iter().map(|u| u.question.clone()).collect();
+        let delta = call.utterances.first().map(|u| u.stage_ms.phone_delta_ms).unwrap_or(10) as u32;
+        let secrets: Arc<dyn ssc_core::secrets::SecretStore> = Arc::new(ssc_core::secrets::KeychainStore);
+        ssc_pipeline::replay::replay_questions(&cfg, secrets, &questions, delta, timing).await?;
+        Ok(())
+    }
 }
 
 pub fn read_jsonl(path: &Path) -> Result<Vec<TimingEvent>> {
@@ -365,8 +385,8 @@ mod tests {
     }
 
     #[test]
-    fn real_pipeline_is_a_marked_stub() {
-        let e = real_pipeline().err().unwrap().to_string();
-        assert!(e.contains("W2-INTEGRATE"), "{e}");
+    fn real_pipeline_is_wired() {
+        // Constructing the driver touches nothing; replay (keys, network) only runs with --live.
+        assert!(real_pipeline().unwrap().name().contains("real ssc-pipeline"));
     }
 }

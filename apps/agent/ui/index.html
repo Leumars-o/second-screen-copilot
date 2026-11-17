@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Second Screen Copilot</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Second Screen Copilot</h1>
+    <span id="status" class="pill">starting…</span>
+    <span id="version" class="muted"></span>
+  </header>
+  <div id="error" class="banner" hidden></div>
+  <div id="download" class="banner info" hidden></div>
+
+  <main>
+    <section id="checklist-section">
+      <h2>First-run checklist</h2>
+      <p class="muted">macOS asks once per permission. Grant each one in System Settings, then come back.</p>
+      <ul id="checklist" class="checklist"></ul>
+    </section>
+
+    <section>
+      <h2>Call</h2>
+      <div class="row">
+        <label>Profile <select id="session-profile"></select></label>
+        <button id="capture">Start capture</button>
+        <button id="answer" class="secondary">Answer now</button>
+      </div>
+      <p class="muted" id="capture-info"></p>
+      <p class="muted" id="hotkeys"></p>
+    </section>
+
+    <section>
+      <h2>Phone</h2>
+      <p id="phone-info" class="muted"></p>
+      <p id="lan-tls" class="muted"></p>
+      <div class="row">
+        <button id="pair">Pair a phone</button>
+        <button id="unpair" class="danger">Unpair</button>
+      </div>
+      <div id="qr" class="qr" hidden></div>
+    </section>
+
+    <section>
+      <h2>About me</h2>
+      <form id="about" class="grid">
+        <label>Name <input name="name"></label>
+        <label>Role <input name="role"></label>
+        <label>Company <input name="company"></label>
+        <label>Product <input name="product"></label>
+        <label>Tone <input name="tone"></label>
+        <label class="wide">Answers I like to give <textarea name="preferred_answers" rows="2"></textarea></label>
+        <button type="submit">Save</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Profiles and documents</h2>
+      <div class="row">
+        <select id="profile-pick"></select>
+        <button id="profile-new" class="secondary">New profile</button>
+      </div>
+      <form id="profile" class="grid">
+        <label>Id (slug) <input name="id" pattern="[a-z0-9-]+" required></label>
+        <label>Name <input name="name" required></label>
+        <label class="wide">Instructions <textarea name="instructions" rows="3"></textarea></label>
+        <button type="submit">Save profile</button>
+      </form>
+      <div class="row">
+        <input type="file" id="doc-file" accept=".pdf,.docx,.md,.txt" multiple>
+        <span id="doc-status" class="muted"></span>
+      </div>
+      <ul id="docs" class="list"></ul>
+    </section>
+
+    <section>
+      <h2>API keys</h2>
+      <p class="muted">Stored in the macOS Keychain. They never go to the phone or the relay. Leave empty and save to remove.</p>
+      <div id="keys" class="keys"></div>
+    </section>
+
+    <section>
+      <h2>Settings</h2>
+      <form id="settings" class="grid">
+        <label>Mode
+          <select name="mode"><option value="cloud">Cloud</option><option value="local">Local only</option></select>
+        </label>
+        <label class="check"><input type="checkbox" name="redaction"> Redact card numbers, IDs and passwords before cloud calls</label>
+        <label class="check"><input type="checkbox" name="redact_emails"> Also redact emails</label>
+        <label class="check"><input type="checkbox" name="keep_transcripts"> Keep transcripts in session history</label>
+        <label>Relay URL <input name="relay_url" placeholder="wss://relay.example.com"></label>
+        <label>LAN domain <input name="lan_domain" placeholder="copilot.example.com"></label>
+        <label>LAN port <input name="lan_port" type="number" min="1" max="65535"></label>
+        <label>Gemini key tier
+          <select name="gemini_tier"><option value="paid">Paid</option><option value="free">Free (test builds only)</option></select>
+        </label>
+        <label>Strong model <input name="strong_model" placeholder="anthropic/claude-…"></label>
+        <label>Strong model base URL <input name="strong_base_url" placeholder="https://… (other providers)"></label>
+        <label>Jev base URL <input name="decision_cloud_base_url"></label>
+        <label class="check" id="testing-row" hidden><input type="checkbox" name="testing"> Testing (debug build only)</label>
+        <button type="submit">Save and restart agent</button>
+      </form>
+    </section>
+
+    <section>
+      <h2>Debug: latency per stage</h2>
+      <table id="debug"><thead><tr><th>From</th><th>To</th><th>n</th><th>p50 ms</th><th>p95 ms</th></tr></thead><tbody></tbody></table>
+    </section>
+  </main>
+</body>
+</html>

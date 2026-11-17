@@ -4,10 +4,32 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Second Screen Copilot PC agent: Tauri 2 shell (tray, global hotkeys, settings UI) over ssc-pipeline."
 
-# Wave 0 placeholder binary. W2-INTEGRATE converts this into the Tauri 2 shell.
+[features]
+# whisper.cpp for local-only mode. Not a default: in `cargo test --workspace` feature unification
+# would turn on ssc-stt's model-dependent whisper test. Ship builds use
+# `cargo build -p ssc-agent --release --features local-stt` (`--self-check` reports it).
+default = []
+local-stt = ["ssc-pipeline/local-stt"]
+# bge-small-en-v1.5 embedder (ONNX Runtime; downloads its runtime at build time).
+fastembed = ["ssc-pipeline/fastembed"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
 [dependencies]
 ssc-core.workspace = true
+ssc-pipeline = { path = "../../crates/ssc-pipeline" }
+ssc-memory = { path = "../../crates/ssc-memory" }
+ssc-crypto = { path = "../../crates/ssc-crypto" }
+ssc-transport = { path = "../../crates/ssc-transport" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2"
 
 [lints]
 workspace = true
