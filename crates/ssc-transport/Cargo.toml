@@ -4,9 +4,25 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "PC side of the phone link: LAN WebSocket + mDNS, relay fallback, batching, heartbeats."
 
 [dependencies]
 ssc-core.workspace = true
+ssc-crypto = { path = "../ssc-crypto" }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-util.workspace = true
+async-trait.workspace = true
+uuid.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+# native-tls: Schannel on Windows, Security.framework on macOS (no C toolchain for cross checks).
+tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
+mdns-sd = "0.21"
+if-addrs = "0.15"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["net", "test-util"] }
 
 [lints]
 workspace = true
