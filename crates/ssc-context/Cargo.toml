@@ -4,9 +4,16 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Context builder: renders contracts/prompts with per-part token budgets (Build Sheet W1-MEMORY)."
 
 [dependencies]
 ssc-core.workspace = true
+tiktoken-rs = "0.7"
+
+[dev-dependencies]
+uuid.workspace = true
+# End-to-end assembly timing against the real store (same owner, test-only).
+ssc-memory = { path = "../ssc-memory" }
 
 [lints]
 workspace = true

@@ -4,9 +4,26 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Local memory store: SQLite + sqlite-vec, doc ingest, retrieval (Build Sheet W1-MEMORY)."
+
+[features]
+# Real local embedder (bge-small-en-v1.5, 384-dim). Off by default so the gate never downloads models.
+fastembed = ["dep:fastembed"]
 
 [dependencies]
 ssc-core.workspace = true
+rusqlite.workspace = true
+sqlite-vec = "0.1"
+serde.workspace = true
+serde_json.workspace = true
+uuid = { workspace = true, features = ["v5"] }
+anyhow.workspace = true
+tiktoken-rs = "0.7"
+sha2 = "0.10"
+pdf-extract = "0.9"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+quick-xml = "0.37"
+fastembed = { version = "5", optional = true }
 
 [lints]
 workspace = true
