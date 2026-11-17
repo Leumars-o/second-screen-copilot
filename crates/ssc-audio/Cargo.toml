@@ -4,9 +4,25 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Audio capture (mic = \"me\", system audio = \"them\"), resampling to 16 kHz mono PCM16, and VAD."
 
 [dependencies]
 ssc-core.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+earshot = "1.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cpal = "0.18"
+screencapturekit = "2.1"
+
+[target.'cfg(windows)'.dependencies]
+cpal = "0.18"
+wasapi = "0.27"
+
+[dev-dependencies]
+hound = "3.5"
+tokio = { workspace = true, features = ["test-util"] }
 
 [lints]
 workspace = true
