@@ -3817,6 +3817,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "ssc-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures-util",
+ "hound",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "ssc-audio",
+ "ssc-context",
+ "ssc-core",
+ "ssc-router",
+ "ssc-stt",
+ "tokio",
+ "tokio-tungstenite",
+ "tokio-util",
+ "uuid",
+]
+
+[[package]]
 name = "ssc-context"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,412 @@
+[
+ {
+  "id": "cloud-call-1",
+  "mode": "cloud",
+  "utterances": [
+   {
+    "question": "What is your pricing?",
+    "stage_ms": {
+     "transcript_final": 283,
+     "trigger_fired": 12,
+     "decision_done": 162,
+     "context_ready": 33,
+     "model_request": 3,
+     "first_token": 345,
+     "frame_sent": 6,
+     "rtt_ms": 28,
+     "phone_delta_ms": 21
+    }
+   },
+   {
+    "question": "Do you integrate with Salesforce?",
+    "stage_ms": {
+     "transcript_final": 293,
+     "trigger_fired": 39,
+     "decision_done": 194,
+     "context_ready": 28,
+     "model_request": 4,
+     "first_token": 236,
+     "frame_sent": 3,
+     "rtt_ms": 25,
+     "phone_delta_ms": 28
+    }
+   },
+   {
+    "question": "How long is onboarding?",
+    "stage_ms": {
+     "transcript_final": 179,
+     "trigger_fired": 37,
+     "decision_done": 163,
+     "context_ready": 27,
+     "model_request": 2,
+     "first_token": 586,
+     "frame_sent": 13,
+     "rtt_ms": 64,
+     "phone_delta_ms": 49
+    }
+   },
+   {
+    "question": "Is there a discount for annual plans?",
+    "stage_ms": {
+     "transcript_final": 227,
+     "trigger_fired": 19,
+     "decision_done": 379,
+     "context_ready": 28,
+     "model_request": 3,
+     "first_token": 634,
+     "frame_sent": 3,
+     "rtt_ms": 68,
+     "phone_delta_ms": 25
+    }
+   },
+   {
+    "question": "Can we get a demo next week?",
+    "stage_ms": {
+     "transcript_final": 298,
+     "trigger_fired": 32,
+     "decision_done": 324,
+     "context_ready": 18,
+     "model_request": 2,
+     "first_token": 330,
+     "frame_sent": 15,
+     "rtt_ms": 41,
+     "phone_delta_ms": 21
+    }
+   },
+   {
+    "question": "What about SSO?",
+    "stage_ms": {
+     "transcript_final": 143,
+     "trigger_fired": 29,
+     "decision_done": 199,
+     "context_ready": 21,
+     "model_request": 3,
+     "first_token": 529,
+     "frame_sent": 7,
+     "rtt_ms": 71,
+     "phone_delta_ms": 17
+    }
+   },
+   {
+    "question": "How do you handle data retention?",
+    "stage_ms": {
+     "transcript_final": 306,
+     "trigger_fired": 34,
+     "decision_done": 213,
+     "context_ready": 39,
+     "model_request": 4,
+     "first_token": 260,
+     "frame_sent": 11,
+     "rtt_ms": 38,
+     "phone_delta_ms": 55
+    }
+   },
+   {
+    "question": "Who else uses this in fintech?",
+    "stage_ms": {
+     "transcript_final": 278,
+     "trigger_fired": 28,
+     "decision_done": 248,
+     "context_ready": 32,
+     "model_request": 1,
+     "first_token": 243,
+     "frame_sent": 13,
+     "rtt_ms": 34,
+     "phone_delta_ms": 33
+    }
+   },
+   {
+    "question": "Can it run on-prem?",
+    "stage_ms": {
+     "transcript_final": 140,
+     "trigger_fired": 19,
+     "decision_done": 201,
+     "context_ready": 22,
+     "model_request": 3,
+     "first_token": 452,
+     "frame_sent": 13,
+     "rtt_ms": 73,
+     "phone_delta_ms": 38
+    }
+   },
+   {
+    "question": "What happens if we exceed the seat limit?",
+    "stage_ms": {
+     "transcript_final": 161,
+     "trigger_fired": 28,
+     "decision_done": 331,
+     "context_ready": 16,
+     "model_request": 6,
+     "first_token": 356,
+     "frame_sent": 14,
+     "rtt_ms": 79,
+     "phone_delta_ms": 58
+    }
+   }
+  ]
+ },
+ {
+  "id": "cloud-call-2",
+  "mode": "cloud",
+  "utterances": [
+   {
+    "question": "What happens if we exceed the seat limit?",
+    "stage_ms": {
+     "transcript_final": 285,
+     "trigger_fired": 9,
+     "decision_done": 237,
+     "context_ready": 27,
+     "model_request": 6,
+     "first_token": 345,
+     "frame_sent": 5,
+     "rtt_ms": 49,
+     "phone_delta_ms": 39
+    }
+   },
+   {
+    "question": "Can it run on-prem?",
+    "stage_ms": {
+     "transcript_final": 189,
+     "trigger_fired": 40,
+     "decision_done": 262,
+     "context_ready": 31,
+     "model_request": 3,
+     "first_token": 651,
+     "frame_sent": 15,
+     "rtt_ms": 69,
+     "phone_delta_ms": 18
+    }
+   },
+   {
+    "question": "Who else uses this in fintech?",
+    "stage_ms": {
+     "transcript_final": 178,
+     "trigger_fired": 7,
+     "decision_done": 311,
+     "context_ready": 22,
+     "model_request": 3,
+     "first_token": 253,
+     "frame_sent": 6,
+     "rtt_ms": 78,
+     "phone_delta_ms": 51
+    }
+   },
+   {
+    "question": "How do you handle data retention?",
+    "stage_ms": {
+     "transcript_final": 303,
+     "trigger_fired": 25,
+     "decision_done": 258,
+     "context_ready": 30,
+     "model_request": 4,
+     "first_token": 422,
+     "frame_sent": 13,
+     "rtt_ms": 49,
+     "phone_delta_ms": 24
+    }
+   },
+   {
+    "question": "What about SSO?",
+    "stage_ms": {
+     "transcript_final": 187,
+     "trigger_fired": 13,
+     "decision_done": 276,
+     "context_ready": 33,
+     "model_request": 5,
+     "first_token": 495,
+     "frame_sent": 7,
+     "rtt_ms": 67,
+     "phone_delta_ms": 52
+    }
+   },
+   {
+    "question": "Can we get a demo next week?",
+    "stage_ms": {
+     "transcript_final": 229,
+     "trigger_fired": 30,
+     "decision_done": 335,
+     "context_ready": 17,
+     "model_request": 2,
+     "first_token": 480,
+     "frame_sent": 10,
+     "rtt_ms": 25,
+     "phone_delta_ms": 18
+    }
+   },
+   {
+    "question": "Is there a discount for annual plans?",
+    "stage_ms": {
+     "transcript_final": 148,
+     "trigger_fired": 14,
+     "decision_done": 231,
+     "context_ready": 35,
+     "model_request": 6,
+     "first_token": 436,
+     "frame_sent": 12,
+     "rtt_ms": 24,
+     "phone_delta_ms": 39
+    }
+   },
+   {
+    "question": "How long is onboarding?",
+    "stage_ms": {
+     "transcript_final": 217,
+     "trigger_fired": 34,
+     "decision_done": 420,
+     "context_ready": 18,
+     "model_request": 5,
+     "first_token": 660,
+     "frame_sent": 3,
+     "rtt_ms": 63,
+     "phone_delta_ms": 22
+    }
+   },
+   {
+    "question": "Do you integrate with Salesforce?",
+    "stage_ms": {
+     "transcript_final": 294,
+     "trigger_fired": 39,
+     "decision_done": 286,
+     "context_ready": 34,
+     "model_request": 6,
+     "first_token": 394,
+     "frame_sent": 4,
+     "rtt_ms": 38,
+     "phone_delta_ms": 42
+    }
+   },
+   {
+    "question": "What is your pricing?",
+    "stage_ms": {
+     "transcript_final": 160,
+     "trigger_fired": 34,
+     "decision_done": 151,
+     "context_ready": 40,
+     "model_request": 6,
+     "first_token": 668,
+     "frame_sent": 14,
+     "rtt_ms": 36,
+     "phone_delta_ms": 47
+    }
+   }
+  ]
+ },
+ {
+  "id": "local-call-1",
+  "mode": "local",
+  "utterances": [
+   {
+    "question": "What is your pricing?",
+    "stage_ms": {
+     "transcript_final": 341,
+     "trigger_fired": 37,
+     "decision_done": 304,
+     "context_ready": 37,
+     "model_request": 6,
+     "first_token": 705,
+     "frame_sent": 13,
+     "rtt_ms": 52,
+     "phone_delta_ms": 53
+    }
+   },
+   {
+    "question": "Do you integrate with Salesforce?",
+    "stage_ms": {
+     "transcript_final": 351,
+     "trigger_fired": 14,
+     "decision_done": 441,
+     "context_ready": 34,
+     "model_request": 2,
+     "first_token": 952,
+     "frame_sent": 15,
+     "rtt_ms": 79,
+     "phone_delta_ms": 48
+    }
+   },
+   {
+    "question": "How long is onboarding?",
+    "stage_ms": {
+     "transcript_final": 250,
+     "trigger_fired": 25,
+     "decision_done": 500,
+     "context_ready": 10,
+     "model_request": 1,
+     "first_token": 771,
+     "frame_sent": 15,
+     "rtt_ms": 39,
+     "phone_delta_ms": 30
+    }
+   },
+   {
+    "question": "Is there a discount for annual plans?",
+    "stage_ms": {
+     "transcript_final": 279,
+     "trigger_fired": 20,
+     "decision_done": 699,
+     "context_ready": 28,
+     "model_request": 1,
+     "first_token": 487,
+     "frame_sent": 14,
+     "rtt_ms": 51,
+     "phone_delta_ms": 19
+    }
+   },
+   {
+    "question": "Can we get a demo next week?",
+    "stage_ms": {
+     "transcript_final": 522,
+     "trigger_fired": 13,
+     "decision_done": 315,
+     "context_ready": 31,
+     "model_request": 4,
+     "first_token": 962,
+     "frame_sent": 5,
+     "rtt_ms": 36,
+     "phone_delta_ms": 48
+    }
+   },
+   {
+    "question": "What about SSO?",
+    "stage_ms": {
+     "transcript_final": 560,
+     "trigger_fired": 32,
+     "decision_done": 358,
+     "context_ready": 39,
+     "model_request": 5,
+     "first_token": 1173,
+     "frame_sent": 14,
+     "rtt_ms": 64,
+     "phone_delta_ms": 27
+    }
+   },
+   {
+    "question": "How do you handle data retention?",
+    "stage_ms": {
+     "transcript_final": 409,
+     "trigger_fired": 30,
+     "decision_done": 593,
+     "context_ready": 30,
+     "model_request": 3,
+     "first_token": 848,
+     "frame_sent": 11,
+     "rtt_ms": 48,
+     "phone_delta_ms": 22
+    }
+   },
+   {
+    "question": "Who else uses this in fintech?",
+    "stage_ms": {
+     "transcript_final": 376,
+     "trigger_fired": 19,
+     "decision_done": 282,
+     "context_ready": 20,
+     "model_request": 1,
+     "first_token": 1002,
+     "frame_sent": 11,
+     "rtt_ms": 34,
+     "phone_delta_ms": 52
+    }
+   }
+  ]
+ }
+]
