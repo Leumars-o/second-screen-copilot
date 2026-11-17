@@ -92,35 +92,35 @@ Format:
 - Why it matters: error strings are logged and shown in the settings UI. Today `ssc-trigger` discards decision errors, so nothing leaks yet; the next `log(e)` would.
 - Failing test: `crates/ssc-router/tests/security_router.rs::decision_adapter_errors_never_contain_the_key` (`#[ignore = "CR-10"]`).
 - Proposed fix: keep only the sanitised `error_type`/`code` (as `http::map_status` already does), or scrub the message: drop it unless it matches a short allowlist (`Unknown model: <id>`), and never include it for 401/403.
-- Status: open
+- Status: fixed (W2-FIX-RUST, 8ace8bc) — message dropped for 401/403; otherwise the key (whole, or any word sharing its first/last 8 chars) is replaced by `[redacted]`, the rest kept.
 
 ## CR-11 — Replay window persisted at most once a second: replays accepted after a crash
 - From: W2-HARDEN. Severity: **low**. Owner: W1-PIPE (`crates/ssc-transport`).
 - What: `crates/ssc-transport/src/core.rs:412` (`maybe_persist`) hands the device record (with `last_recv`) to the keychain writer only when a seq block is reserved or ≥1 s after the last write (`:419`), while frames are delivered at once (`:325`). After a crash/kill, the PC restarts with a stale window and accepts again any phone frame recorded in that last second (e.g. a relay operator replaying `memory.delete` / `contact.confirm`).
 - Failing test: `crates/ssc-transport/tests/security_link.rs::replay_window_is_persisted_before_frames_are_delivered` (`#[ignore = "CR-11"]`).
 - Proposed fix: before delivering any non-heartbeat frame, persist `last_recv` (commands are rare, so one keychain write per command is cheap), or reserve the receive window like the send side: persist `last_recv + W` and, after a restart, drop frames below the persisted mark until the peer's seq passes it.
-- Status: open
+- Status: fixed (W2-FIX-RUST, 8ace8bc) — the advanced `last_recv` is handed to the keychain writer before each non-heartbeat frame is delivered (no receive-side reservation: that would drop legitimate phone frames after a restart). Residual: the keychain write itself is async, so a crash within that write (ms) can still lose it. Loopback command round trip p50 ≈ 0.70 ms before and after.
 
 ## CR-12 — LAN socket slots: no auth deadline and no Origin check
 - From: W2-HARDEN. Severity: **medium** (availability only; the relay path still works). Owner: W1-PIPE (`crates/ssc-transport`).
 - What: `crates/ssc-transport/src/ws.rs:19,82` allow 8 sockets; an unauthenticated socket is only closed after `dead_after` (15 s, `core.rs:340`) or 8 bad frames. `ws.rs:105,114` accept the upgrade from any `Origin`. WebSockets are not subject to CORS, so any web page open in a browser on the PC or the Wi-Fi (no LAN foothold needed) can keep all 8 slots busy and lock the paired phone out of the LAN path.
 - Failing tests: `crates/ssc-transport/tests/security_link.rs::idle_unauthenticated_sockets_cannot_lock_out_the_phone`, `::cross_origin_browser_upgrades_are_refused` (both `#[ignore = "CR-12"]`).
 - Proposed fix: (1) in the upgrade callback, refuse any `Origin` other than the PWA's origin (configurable; a native client sends none); (2) give unauthenticated sockets a short deadline (≈3 s to the first valid frame or `pair.hello`) and, when slots are full, evict the oldest unauthenticated socket instead of refusing the newcomer.
-- Status: open
+- Status: fixed (W2-FIX-RUST, 8ace8bc) — `TransportConfig::auth_deadline` (3 s) closes unauthenticated LAN sockets, LAN handshake uses the same budget; when the 8 slots are full a newcomer evicts the oldest unauthenticated socket (never an authenticated one); a browser `Origin` must match `TransportConfig::allowed_origins` (no `Origin` = native client, allowed). The PWA origin is not in `Config`, so `from_core` derives it: `https://<parent of lan_domain>` and its subdomains, `https://<relay host>` exactly, plus `$SSC_PWA_ORIGINS`. A PWA hosted elsewhere needs that env var (or a future Config field, CR).
 
 ## CR-13 — Cloudflare client takes over A records it did not create (incl. the zone apex)
 - From: W2-HARDEN. Severity: **medium**. Owner: W2-LANTLS / W1-PIPE (`crates/ssc-transport/src/lan_tls`).
 - What: `crates/ssc-transport/src/lan_tls/cloudflare.rs:149` (`upsert_a`) re-points any single existing `A` record with the configured name (`:160`). `normalize_domain` (`lan_tls/mod.rs:154`) accepts the bare zone. A typo in `lan_domain`, or setting it to `example.com` / `www.example.com`, silently points the user's website at a private LAN IP.
 - Failing test: `crates/ssc-transport/tests/security_link.rs::refuses_to_repoint_records_it_does_not_own` (`#[ignore = "CR-13"]`; covers the apex and a foreign record).
 - Proposed fix: mark records the agent creates (Cloudflare record `comment`, e.g. `managed-by: second-screen-copilot <pc-id>`) and update only records carrying that marker; refuse (touch nothing, clear error) when an unmarked record exists. Refuse a `lan_domain` equal to the zone name. The existing `proxied_record_is_switched_to_dns_only` test then needs a marked record.
-- Status: open
+- Status: fixed (W2-FIX-RUST, 8ace8bc) — records we create carry `comment: managed-by: second-screen-copilot`; only marked A records are updated; an unmarked record is adopted only if DNS-only and already pointing at the PC's LAN IP (marker added on the same update, existing note kept after it); otherwise refused untouched with "record exists and isn't managed by Second Screen Copilot". `lan_domain` equal to the zone (name from the zone lookup; two-label names when the token lacks Zone:Read) is refused.
 
 ## CR-14 — Local-only mode still calls the Cloudflare API and Let's Encrypt
 - From: W2-HARDEN. Severity: **low** (metadata, not call content). Owner: W2-INTEGRATE (`crates/ssc-pipeline/src/transport.rs`) or W1-PIPE.
 - What: `crates/ssc-pipeline/src/transport.rs:95` always spawns `LanTlsManager`, which (`lan_tls/mod.rs:200` onward) reads the Cloudflare token, publishes the LAN IP in the A record and orders certificates even when `mode = local`. The spec promises that in local mode "nothing leaves the PC except encrypted frames to the phone".
 - Failing test: `crates/ssc-transport/tests/security_link.rs::local_only_mode_makes_no_cloudflare_or_acme_calls` (`#[ignore = "CR-14"]`).
 - Proposed fix: in local-only mode, serve a still-valid cached certificate but make no Cloudflare/ACME call (manager checks `cfg.mode`); offer an explicit settings toggle "allow DNS/certificate upkeep in local-only mode" and show the consequence (plain `ws://` LAN is blocked by the HTTPS PWA, so the phone would use the relay) in the settings UI.
-- Status: open
+- Status: fixed (W2-FIX-RUST, 8ace8bc) — in local-only mode `ensure_lan_tls_with` makes no Cloudflare/ACME call (serves a still-valid cached certificate, else plain `ws://`) and `LanTlsManager` does one offline pass and stops. The suggested "allow upkeep in local-only mode" toggle needs a Config field (ssc-core frozen) and is not done.
 
 ## CR-15 — PWA has no Content-Security-Policy while holding the direction keys in localStorage
 - From: W2-HARDEN. Severity: **low** (defence in depth; no injection sink found). Owner: W1-PHONE (`apps/phone`).
