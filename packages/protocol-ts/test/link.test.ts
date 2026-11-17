@@ -74,6 +74,19 @@ describe("PhoneLink <-> mock PC", () => {
     expect(link!.dropped).toEqual({ crypto: 0, schema: 0, replay: 0, mismatch: 0 });
   });
 
+  it("answers a PC heartbeat probe at once with echo, and never answers an echo", async () => {
+    await pairedLink();
+    await new Promise((r) => setTimeout(r, 1300)); // past the phone's first tick; next one is ~5 s away
+    const t0 = Date.now();
+    await pc!.send({ type: "heartbeat", payload: {} });
+    // The echo must be of this probe (ts >= t0), well before the phone's 5 s tick.
+    await until(() => pc!.received.some((e) => e.type === "heartbeat" && (e.payload.echo ?? 0) >= t0), 1000);
+    const n = pc!.received.length;
+    await pc!.send({ type: "heartbeat", payload: { echo: 1 } });
+    await new Promise((r) => setTimeout(r, 200));
+    expect(pc!.received.length).toBe(n);
+  });
+
   it("falls back from a dead LAN url to the next url", async () => {
     const dead = await freePort();
     const { statuses } = await pairedLink((lan) => [`ws://127.0.0.1:${dead}`, `${lan}/r/room`]);

@@ -223,7 +223,12 @@ export class PhoneLink {
       this.paired = true;
       this.opts.onPaired?.();
     }
-    if (env.type === "heartbeat") this.lastPeerHeartbeatTs = env.ts;
+    if (env.type === "heartbeat") {
+      this.lastPeerHeartbeatTs = env.ts;
+      // Answer a probe (no echo) at once so the PC's RTT = now - echo is not inflated by our tick.
+      // Never answer an echo, or the two sides would ping-pong.
+      if (env.payload.echo === undefined) void this.send({ type: "heartbeat", payload: { echo: env.ts } });
+    }
     if (env.type === "session.start") this.sessionIdValue = env.payload.session_id;
     if (env.type === "session.end" && this.sessionIdValue === env.payload.session_id) this.sessionIdValue = null;
     if (env.type === "session.start" || env.type === "session.end") this.persist();

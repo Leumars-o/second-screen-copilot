@@ -179,7 +179,7 @@ export class MockPc {
     if (!env) return;
     this.received.push(env);
     if (env.type === "heartbeat") {
-      await this.send({ type: "heartbeat", payload: { echo: env.ts } });
+      if (env.payload.echo === undefined) await this.send({ type: "heartbeat", payload: { echo: env.ts } });
     } else if (env.type === "command") {
       await this.onCommand(env.payload);
     }
