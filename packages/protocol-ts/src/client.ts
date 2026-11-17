@@ -7,6 +7,8 @@ import { helloFrame, pairingKeys, type Pairing } from "./pairing";
 export const HEARTBEAT_MS = 5_000;
 export const DEAD_AFTER_MS = 15_000;
 export const CONNECT_TIMEOUT_MS = 1_500;
+/** Connections on which an unconfirmed pair.hello is (re)sent before giving up (one per connection). */
+export const MAX_HELLO_SENDS = 8;
 
 /** Minimal WebSocket surface shared by the browser and the `ws` package. */
 export interface WsLike {
@@ -28,15 +30,18 @@ export type LinkStatus =
 
 export interface LinkOptions {
   pairing: Pairing;
-  /** Plaintext pair.hello to send once on the first connection (fresh pairing only). */
+  /** Plaintext pair.hello (fresh pairing only). Sent once per connection until the PC's first
+   * authentic frame confirms pairing, on at most MAX_HELLO_SENDS connections; the PC ignores
+   * repeats of the hello it already accepted. */
   hello?: string;
   state?: ChannelState;
   sessionId?: string | null;
   ws: WsFactory;
   onEnvelope: (env: AnyEnvelope) => void;
   onStatus?: (s: LinkStatus) => void;
-  /** Persist seq state and the active session so a reload does not reset replay protection (README § Frames, seq scope). */
-  onPersist?: (s: { state: ChannelState; sessionId: string | null; helloSent: boolean }) => void;
+  /** Persist seq state and the active session so a reload does not reset replay protection (README § Frames, seq scope).
+   * `helloConfirmed`: the PC confirmed pairing, so the stored hello can be dropped. */
+  onPersist?: (s: { state: ChannelState; sessionId: string | null; helloConfirmed: boolean }) => void;
   /** Called once the PC has answered the pair.hello with a valid encrypted frame. */
   onPaired?: () => void;
   now?: () => number;
@@ -58,7 +63,7 @@ export class PhoneLink {
   private hello: string | undefined;
   private paired: boolean;
   private sessionIdValue: string | null;
-  private lastPeerHeartbeatTs: number | undefined;
+  private helloSends = 0;
   private lastHeard = 0;
   private hbTimer: ReturnType<typeof setInterval> | undefined;
   private retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -123,7 +128,7 @@ export class PhoneLink {
   }
 
   private persist(): void {
-    this.opts.onPersist?.({ state: this.channel.state, sessionId: this.sessionIdValue, helloSent: this.hello === undefined });
+    this.opts.onPersist?.({ state: this.channel.state, sessionId: this.sessionIdValue, helloConfirmed: this.paired });
   }
 
   private connect(index: number): void {
@@ -157,11 +162,13 @@ export class PhoneLink {
       this.lastHeard = this.now();
       const via = /^wss?:\/\/[^/]+\/r\//.test(url) ? "relay" : "lan";
       this.opts.onStatus?.({ state: "connected", url, via });
-      if (this.hello !== undefined) {
-        ws.send(helloFrame(this.hello)); // the single plaintext frame: binary 0x00 || JSON (README § Pairing)
-        this.hello = undefined;
-        this.persist();
+      // The single plaintext frame: binary 0x00 || JSON (README § Pairing). Once per connection
+      // until confirmed: a hello (or the PC's confirmation) lost with a dying socket is retried.
+      if (!this.paired && this.hello !== undefined && this.helloSends < MAX_HELLO_SENDS) {
+        this.helloSends++;
+        ws.send(helloFrame(this.hello));
       }
+      // A probe: the PC's echo of it confirms pairing and marks this path live on the PC.
       void this.send({ type: "heartbeat", payload: {} });
       clearInterval(this.hbTimer);
       this.hbTimer = setInterval(() => this.tick(), HEARTBEAT_MS / 5);
@@ -210,8 +217,9 @@ export class PhoneLink {
     }
     if (now - this.lastSentHb >= HEARTBEAT_MS) {
       this.lastSentHb = now;
-      const payload = this.lastPeerHeartbeatTs !== undefined ? { echo: this.lastPeerHeartbeatTs } : {};
-      void this.send({ type: "heartbeat", payload });
+      // Always a probe (no echo). Echoing an earlier PC heartbeat here would hand the PC a stale
+      // ts and inflate its RTT; PC probes are echoed at once in receive().
+      void this.send({ type: "heartbeat", payload: {} });
     }
   }
 
@@ -221,10 +229,11 @@ export class PhoneLink {
     this.lastHeard = this.now();
     if (!this.paired) {
       this.paired = true;
+      this.hello = undefined;
+      this.persist();
       this.opts.onPaired?.();
     }
     if (env.type === "heartbeat") {
-      this.lastPeerHeartbeatTs = env.ts;
       // Answer a probe (no echo) at once so the PC's RTT = now - echo is not inflated by our tick.
       // Never answer an echo, or the two sides would ping-pong.
       if (env.payload.echo === undefined) void this.send({ type: "heartbeat", payload: { echo: env.ts } });

@@ -258,6 +258,24 @@ async fn token_without_zone_read_needs_zone_id() {
     assert!(!env.cf().log.iter().any(|l| l.starts_with("GET /client/v4/zones?")));
 }
 
+/// CR-9: `Config::lan_zone_id` stands in for Zone:Read; the option (`$SSC_CLOUDFLARE_ZONE_ID`)
+/// overrides it.
+#[tokio::test]
+async fn config_lan_zone_id_is_used_and_option_overrides_it() {
+    let env = Env::new(90).await;
+    env.cf().zone_read = false;
+    let with_zone = Config { lan_zone_id: Some(format!(" {ZONE} ")), ..cfg() };
+    let out = ensure_lan_tls_with(&with_zone, secrets().as_ref(), &env.opts()).await;
+    assert!(out.tls.is_some(), "{:?}", out.status);
+    assert_eq!(out.zone.as_deref(), Some(ZONE));
+    assert!(!env.cf().log.iter().any(|l| l.starts_with("GET /client/v4/zones?")));
+
+    let mut o = env.opts();
+    o.zone_id = Some("zone-from-env".into());
+    let out = ensure_lan_tls_with(&with_zone, secrets().as_ref(), &o).await;
+    assert_eq!(out.zone.as_deref(), Some("zone-from-env"));
+}
+
 #[tokio::test]
 async fn bad_token_is_a_dns_failure_without_the_token_in_the_message() {
     let env = Env::new(90).await;

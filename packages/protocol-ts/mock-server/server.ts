@@ -85,6 +85,8 @@ export class MockPc {
   private pcPriv!: Uint8Array;
   private token!: Uint8Array;
   private tokenBurned = false;
+  /** phone_pub of the accepted hello: a repeat of it is ignored (the phone resends until confirmed). */
+  private pairedPhonePub: string | null = null;
   private badHellos = 0;
   private keys: { pcToPhone: Uint8Array; phoneToPc: Uint8Array } | null = null;
   private channel: SecureChannel | null = null;
@@ -134,6 +136,7 @@ export class MockPc {
     this.badHellos = 0;
     this.keys = null;
     this.channel = null;
+    this.pairedPhonePub = null;
     const lan = this.lanUrl;
     const relay = `wss://relay.invalid/r/${await roomId(this.token)}`;
     const urls = this.opts.qrUrls ? this.opts.qrUrls(lan) : [lan, relay];
@@ -157,11 +160,19 @@ export class MockPc {
     const wire = new Uint8Array(data);
     if (wire[0] === HELLO_FRAME_VERSION) {
       // The single plaintext frame: 0x00 || pair.hello JSON.
+      let repeat = false;
+      try {
+        repeat = this.pairedPhonePub !== null && parseHelloFrame(wire).payload.phone_pub === this.pairedPhonePub;
+      } catch {
+        /* handled below */
+      }
+      if (repeat) return; // idempotent, like the PC
       if (this.tokenBurned) return void ws.close(4001, "token used");
       try {
         const env = parseHelloFrame(wire);
         this.keys = await verifyPairHello(env, { privateKey: this.pcPriv, token: this.token, exp: this.qr.exp });
         this.tokenBurned = true; // one use
+        this.pairedPhonePub = env.payload.phone_pub;
         this.channel = new SecureChannel({ sendKey: this.keys.pcToPhone, recvKey: this.keys.phoneToPc });
         this.received.push(env);
         this.pairedCount++;

@@ -6,8 +6,10 @@
 //! - Relay client (`<relay>/r/<room>`), always connected when a relay is configured, used when
 //!   the phone is not reachable on the LAN. Frames are opaque to the relay.
 //! - LAN preferred, relay fallback, transparently (see `core` module docs).
-//! - `answer.delta` batching (50 ms / 32 chars), heartbeats every 5 s with `echo` for RTT,
-//!   link dead after 15 s of silence.
+//! - `answer.delta` batching (50 ms / 32 chars; the first delta of each answer is sent at once),
+//!   heartbeats every 5 s with `echo` for RTT, link dead after 15 s of silence.
+//! - [`PcTransport::take_frame_sent`]: when the first `answer.delta` of each answer was written
+//!   to the socket, for the `frame_sent` timing stage.
 //!
 //! ## Wire behaviour the phone must mirror
 //! - CR-2: every frame is a binary WebSocket message (text frames are ignored). Sealed frames
@@ -18,11 +20,17 @@
 //!   (LAN; the relay socket is the PC's own and stays up).
 //! - CR-3: `seq` is per pairing and survives reconnects and restarts; persist the records from
 //!   [`PcTransport::take_device_updates`].
-//! - A `heartbeat` without `echo` is answered immediately with `heartbeat { echo: <its ts> }`;
-//!   a `heartbeat` with `echo` gives RTT = now − echo. Heartbeats are not delivered to
+//! - A `heartbeat` without `echo` is a probe and is answered immediately with
+//!   `heartbeat { echo: <its ts> }`; the phone's periodic heartbeats must be probes (no echo).
+//!   A `heartbeat` with `echo` gives RTT = now − echo only if `echo` is the ts of a probe this
+//!   PC sent recently; other echoes are ignored. Heartbeats are not delivered to
 //!   `take_incoming` consumers.
-//! - The PC sends on the socket that last delivered a valid frame from the phone, so the phone
-//!   picks the path: LAN when it can, else the relay.
+//! - `pair.hello` may be repeated (the phone resends it on each connection until the PC's first
+//!   sealed frame confirms pairing); a repeat of the current pairing's hello is ignored.
+//! - The PC sends on the socket that last delivered a valid frame from the phone within
+//!   `dead_after`, so the phone picks the path: LAN when it can, else the relay. While the phone
+//!   is not live anywhere, frames wait in a bounded queue (256) and go out on its first
+//!   authentic frame; the relay does not buffer, so nothing is sent into an empty room.
 
 mod batch;
 mod core;
@@ -173,10 +181,14 @@ pub fn origin_allowed(origin: &str, allowed: &[String]) -> bool {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LinkStatus {
-    /// Path outgoing frames would take now (`None`: queued until a link comes up).
+    /// Path outgoing frames would take now (`None`: phone not live; frames are queued).
     pub path: Option<LinkPath>,
     /// True if the phone delivered a valid frame within `dead_after`.
     pub phone_live: bool,
+    /// The PC's relay socket is open (the phone may or may not be in the room).
+    pub relay_connected: bool,
+    /// Frames waiting for the phone to come back.
+    pub queued: usize,
     /// Last measured heartbeat round trip.
     pub rtt_ms: Option<u64>,
     pub paired: bool,
@@ -186,9 +198,26 @@ pub struct LinkStatus {
     pub dropped_frames: u64,
 }
 
+/// The first `answer.delta` of an answer was written to the phone's socket.
+///
+/// Emitted once per `answer_id` (the first delta frame of that answer, whichever block), after
+/// the frame was handed to the socket and flushed — i.e. after any batching and any wait in the
+/// offline queue. `t_ms` is read from the [`Clock`] given to [`PcTransport::start`] at that
+/// moment; use it as the `frame_sent` stage (Build Sheet §4.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameSent {
+    pub answer_id: Uuid,
+    pub t_ms: u64,
+    pub path: LinkPath,
+}
+
+/// Capacity of the [`FrameSent`] channel; events beyond it are dropped, never blocking the link.
+pub const FRAME_SENT_QUEUE: usize = 256;
+
 pub struct PcTransport {
     cmd_tx: mpsc::Sender<core::Cmd>,
     incoming: Mutex<Option<mpsc::Receiver<Envelope>>>,
+    frame_sent: Mutex<Option<mpsc::Receiver<FrameSent>>>,
     device_updates: Mutex<Option<mpsc::Receiver<PairedDevice>>>,
     status: Arc<Mutex<LinkStatus>>,
     has_device: Arc<AtomicBool>,
@@ -229,6 +258,7 @@ impl PcTransport {
         let (cmd_tx, cmd_rx) = mpsc::channel(4096);
         let (incoming_tx, incoming_rx) = mpsc::channel(1024);
         let (device_tx, device_rx) = mpsc::channel(64);
+        let (frame_sent_tx, frame_sent_rx) = mpsc::channel(FRAME_SENT_QUEUE);
         let (room_tx, room_rx) = watch::channel(None);
         let status = Arc::new(Mutex::new(LinkStatus::default()));
         let has_device = Arc::new(AtomicBool::new(false));
@@ -245,6 +275,7 @@ impl PcTransport {
             room_tx,
             status.clone(),
             has_device.clone(),
+            frame_sent_tx,
         );
         tokio::spawn(core.run(cmd_rx, cancel.clone()));
         tokio::spawn(ws::lan_server(
@@ -271,6 +302,7 @@ impl PcTransport {
         Ok(Self {
             cmd_tx,
             incoming: Mutex::new(Some(incoming_rx)),
+            frame_sent: Mutex::new(Some(frame_sent_rx)),
             device_updates: Mutex::new(Some(device_rx)),
             status,
             has_device,
@@ -318,6 +350,13 @@ impl PcTransport {
         let (reply, rx) = oneshot::channel();
         self.cmd(core::Cmd::Device { reply }).await.ok()?;
         rx.await.ok().flatten()
+    }
+
+    /// [`FrameSent`] events, one per answer: when its first `answer.delta` hit the wire. `Some`
+    /// once. Optional: if never taken (or not drained), events are dropped and the link is
+    /// unaffected.
+    pub fn take_frame_sent(&self) -> Option<mpsc::Receiver<FrameSent>> {
+        self.frame_sent.lock().expect("lock").take()
     }
 
     pub fn status(&self) -> LinkStatus {

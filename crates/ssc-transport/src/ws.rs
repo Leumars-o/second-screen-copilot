@@ -52,9 +52,13 @@ pub(crate) async fn run_conn<S>(
                 break;
             }
             out = rx.recv() => match out {
-                Some(ConnOut::Frame(bytes)) => {
+                Some(ConnOut::Frame(bytes, note)) => {
                     if sink.send(WsMessage::Binary(bytes.into())).await.is_err() {
                         break;
+                    }
+                    // Written and flushed to the socket: this is `frame_sent`.
+                    if let Some(note) = note {
+                        note.report();
                     }
                 }
                 Some(ConnOut::Close) | None => {

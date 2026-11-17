@@ -19,16 +19,17 @@ export function restoreLinkState(saved: StoredLink | null) {
 
 export interface StoredPairing {
   pairing: Pairing;
-  /** Present until the plaintext pair.hello has been sent (it is sent exactly once). */
+  /** Present until the PC has confirmed the pairing (the link resends it on each new connection
+   * until then, at most once per connection). */
   hello?: string;
   confirmed: boolean;
 }
 interface StoredLink {
   state: ChannelState;
   sessionId: string | null;
-  /** Written synchronously when pair.hello goes out, so a reload never re-sends it even if the
-   * async IndexedDB update that drops `hello` from the pairing did not land. */
-  helloSent?: boolean;
+  /** Written synchronously when the PC confirms pairing, so a reload never re-sends the hello
+   * even if the async IndexedDB update that drops `hello` from the pairing did not land. */
+  helloConfirmed?: boolean;
 }
 
 function read<T>(key: string): T | null {
@@ -60,7 +61,7 @@ export async function loadPairing(): Promise<StoredPairing | null> {
   } catch {
     return null;
   }
-  if (p?.hello && read<StoredLink>(LINK_KEY)?.helloSent) {
+  if (p?.hello && (p.confirmed || read<StoredLink>(LINK_KEY)?.helloConfirmed)) {
     delete p.hello;
     savePairing(p);
   }
@@ -127,11 +128,11 @@ export function connect(
       copilot.handle(env);
     },
     onStatus: hooks.onStatus,
-    onPersist: ({ state, sessionId, helloSent }) => {
-      pending = { state, sessionId, helloSent };
-      if (helloSent && stored.hello) {
+    onPersist: ({ state, sessionId, helloConfirmed }) => {
+      pending = { state, sessionId, helloConfirmed };
+      if (helloConfirmed && stored.hello) {
         delete stored.hello;
-        write(LINK_KEY, pending); // the hello must never be re-sent: persist now, not later
+        write(LINK_KEY, pending); // confirmed: the hello is no longer needed; persist now, not later
         savePairing(stored);
       }
       if (!flushScheduled) {

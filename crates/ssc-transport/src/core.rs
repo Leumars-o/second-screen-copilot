@@ -2,12 +2,14 @@
 //! mutates link state happens on this one task, so there are no locks around crypto state.
 //!
 //! Path choice (LAN preferred, relay fallback, transparent to `Transport` users): frames go out
-//! on the socket that most recently delivered a valid frame from the phone (the phone prefers
-//! LAN, so this follows it). If no socket has a live phone, frames go to the open relay socket;
-//! if there is none, they wait in a bounded queue until a link comes up.
+//! on the socket that most recently delivered a valid frame from the phone within `dead_after`
+//! (the phone prefers LAN, so this follows it). If no socket has a live phone, frames wait in a
+//! bounded queue and are flushed, in order, on the first authentic frame from the phone. The
+//! relay socket alone is not enough: the relay does not buffer, so a frame sent while the phone
+//! is away would be lost.
 
 use crate::batch::{Batcher, Outgoing};
-use crate::{LinkStatus, TransportConfig};
+use crate::{FrameSent, LinkStatus, TransportConfig};
 use ssc_core::protocol::{Envelope, Heartbeat, Message, QrPayload};
 use ssc_core::traits::Clock;
 use ssc_crypto::{Counters, Identity, PairedDevice, PairingOffer, Role, SecureChannel};
@@ -23,6 +25,10 @@ use uuid::Uuid;
 const PENDING_CAP: usize = 256;
 /// Undecryptable frames tolerated on a not-yet-authenticated LAN socket before closing it.
 const MAX_BAD_UNAUTHED: u32 = 8;
+/// Heartbeat probes remembered for RTT matching (one every `heartbeat_interval`).
+const PROBES_CAP: usize = 8;
+/// Answer ids whose first `answer.delta` has been handed to a socket (for [`FrameSent`]).
+const REPORTED_CAP: usize = 64;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LinkPath {
@@ -31,8 +37,25 @@ pub enum LinkPath {
 }
 
 pub(crate) enum ConnOut {
-    Frame(Vec<u8>),
+    /// A sealed frame; with a note when it is the first `answer.delta` of an answer, reported
+    /// as [`FrameSent`] once the socket has written it.
+    Frame(Vec<u8>, Option<SentNote>),
     Close,
+}
+
+/// Turned into a [`FrameSent`] by the socket task once the frame is written.
+pub(crate) struct SentNote {
+    pub answer_id: Uuid,
+    pub path: LinkPath,
+    pub clock: Arc<dyn Clock>,
+    pub tx: mpsc::Sender<FrameSent>,
+}
+
+impl SentNote {
+    pub(crate) fn report(self) {
+        let ev = FrameSent { answer_id: self.answer_id, t_ms: self.clock.now_ms(), path: self.path };
+        let _ = self.tx.try_send(ev); // nobody listening (or far behind): drop
+    }
 }
 
 pub(crate) enum Cmd {
@@ -86,10 +109,16 @@ pub(crate) struct Core {
     pub room_tx: watch::Sender<Option<String>>,
     pub status: Arc<Mutex<LinkStatus>>,
     pub has_device: Arc<AtomicBool>,
+    pub frame_sent_tx: mpsc::Sender<FrameSent>,
     conns: HashMap<u64, Conn>,
     batcher: Batcher,
     pending: VecDeque<Outgoing>,
     rtt_ms: Option<u64>,
+    /// `ts` of heartbeat probes sent and not yet echoed (oldest first). An echo counts for RTT
+    /// only if it matches one of these.
+    probes: VecDeque<u64>,
+    /// See [`REPORTED_CAP`].
+    reported: VecDeque<Uuid>,
     dropped: u64,
     last_hb: Instant,
     /// CR-3 persistence bookkeeping.
@@ -111,6 +140,7 @@ impl Core {
         room_tx: watch::Sender<Option<String>>,
         status: Arc<Mutex<LinkStatus>>,
         has_device: Arc<AtomicBool>,
+        frame_sent_tx: mpsc::Sender<FrameSent>,
     ) -> Self {
         let channel = device.as_ref().map(|d| SecureChannel::new(Role::Pc, &d.keys, d.counters));
         has_device.store(device.is_some(), Ordering::SeqCst);
@@ -128,10 +158,13 @@ impl Core {
             room_tx,
             status,
             has_device,
+            frame_sent_tx,
             conns: HashMap::new(),
             batcher,
             pending: VecDeque::new(),
             rtt_ms: None,
+            probes: VecDeque::new(),
+            reported: VecDeque::new(),
             dropped: 0,
             last_hb: Instant::now(),
             persist_pending: false,
@@ -189,8 +222,9 @@ impl Core {
                 let _ = reply.send(snap);
             }
             Cmd::Opened { id, path, tx } => {
+                // No flush here: a fresh socket (notably the PC's own relay socket) says nothing
+                // about whether the phone is there. Pending frames go on its first valid frame.
                 self.conns.insert(id, Conn { path, tx, opened: Instant::now(), last_rx: None, bad: 0 });
-                self.flush_pending();
             }
             Cmd::Frame { id, data } => self.on_frame(id, &data),
             Cmd::Closed { id } => {
@@ -287,19 +321,30 @@ impl Core {
     }
 
     /// The single unencrypted frame: `pair.hello`, only while a pairing offer is armed.
+    ///
+    /// A repeat of the hello the current pairing came from (same `phone_pub`; every pairing uses
+    /// a fresh phone key) is ignored: the phone resends its hello on each connection until the
+    /// PC confirms, and the confirmation may have been lost. The socket stays open (on the LAN
+    /// it must still authenticate with a sealed frame in time) and no offer attempt is used up.
     fn on_plaintext(&mut self, id: u64, data: &[u8]) {
-        self.dropped += 1; // counted unless it turns into a successful pairing below
         let path = self.conns[&id].path;
         let close_lan = |s: &mut Self| {
             if path == LinkPath::Lan {
                 s.close(id);
             }
         };
-        let Some(offer) = self.offer.as_mut() else { return close_lan(self) };
         let hello = match Envelope::from_slice(data) {
-            Ok(Envelope { message: Message::PairHello(h), .. }) => h,
-            _ => return close_lan(self),
+            Ok(Envelope { message: Message::PairHello(h), .. }) => Some(h),
+            _ => None,
         };
+        if let (Some(h), Some(dev)) = (&hello, &self.device)
+            && h.phone_pub == dev.phone_pub
+        {
+            return;
+        }
+        self.dropped += 1; // counted unless it turns into a successful pairing below
+        let Some(offer) = self.offer.as_mut() else { return close_lan(self) };
+        let Some(hello) = hello else { return close_lan(self) };
         let now_ms = self.clock.now_ms();
         match offer.accept(&self.identity, &hello, now_ms / 1000, now_ms) {
             Ok(dev) => {
@@ -310,6 +355,7 @@ impl Core {
                 self.has_device.store(true, Ordering::SeqCst);
                 self.pending.clear(); // never deliver frames queued for a previous device
                 self.rtt_ms = None;
+                self.probes.clear();
                 self.persisted_recv = None; // the new channel's persist flag sends the record
                 // Cut off sockets of any previously paired phone: LAN sockets close, the relay
                 // socket (ours) loses its live mark until the new phone speaks on it.
@@ -324,8 +370,8 @@ impl Core {
                 if let Some(c) = self.conns.get_mut(&id) {
                     c.last_rx = Some(Instant::now());
                 }
-                // Confirmation: the first sealed frame the phone can open.
-                self.send_now(id, None, Message::Heartbeat(Heartbeat::default()));
+                // Confirmation: the first sealed frame the phone can open (also an RTT probe).
+                self.probe(id);
                 self.update_room();
             }
             Err(_) => {
@@ -344,9 +390,14 @@ impl Core {
                 self.send_now(id, env.session_id, Message::Heartbeat(Heartbeat { echo: Some(env.ts) }));
             }
             Message::Heartbeat(Heartbeat { echo: Some(sent) }) => {
-                let now = self.clock.now_ms();
-                if sent <= now {
-                    self.rtt_ms = Some(now - sent);
+                // Only an echo of one of our own outstanding probes is a round trip; anything else
+                // (a stale or invented echo) would corrupt RTT and thus `phone_rendered`.
+                if let Some(pos) = self.probes.iter().position(|&t| t == sent) {
+                    self.probes.drain(..=pos);
+                    let now = self.clock.now_ms();
+                    if sent <= now {
+                        self.rtt_ms = Some(now - sent);
+                    }
                 }
             }
             Message::PairHello(_) => {} // only valid in plaintext
@@ -387,7 +438,7 @@ impl Core {
         if self.channel.is_some() && now.duration_since(self.last_hb) >= self.cfg.heartbeat_interval {
             self.last_hb = now;
             if let Some(id) = self.target() {
-                self.send_now(id, None, Message::Heartbeat(Heartbeat::default()));
+                self.probe(id);
             }
         }
         if self.offer.as_ref().is_some_and(|o| self.clock.now_ms() / 1000 > o.exp()) {
@@ -396,21 +447,33 @@ impl Core {
         }
     }
 
-    /// Socket to send on (see module docs).
+    /// Socket to send on: the one the phone was most recently heard on, within `dead_after`.
+    /// `None` = phone away; frames queue (see module docs).
     fn target(&self) -> Option<u64> {
         let dead = self.cfg.dead_after;
         let now = Instant::now();
-        let live = self
-            .conns
+        self.conns
             .iter()
             .filter_map(|(id, c)| c.last_rx.filter(|t| now.duration_since(*t) <= dead).map(|t| (t, *id)))
-            .max();
-        live.map(|(_, id)| id).or_else(|| self.conns.iter().find(|(_, c)| c.path == LinkPath::Relay).map(|(id, _)| *id))
+            .max()
+            .map(|(_, id)| id)
+    }
+
+    /// Send a heartbeat probe (no echo) and remember its ts for RTT matching.
+    fn probe(&mut self, id: u64) {
+        if let Some(ts) = self.send_now(id, None, Message::Heartbeat(Heartbeat::default())) {
+            if self.probes.len() == PROBES_CAP {
+                self.probes.pop_front();
+            }
+            self.probes.push_back(ts);
+        }
     }
 
     fn emit(&mut self, (session_id, message): Outgoing) {
         match self.target() {
-            Some(id) => self.send_now(id, session_id, message),
+            Some(id) => {
+                self.send_now(id, session_id, message);
+            }
             None => {
                 if self.pending.len() == PENDING_CAP {
                     self.pending.pop_front();
@@ -428,18 +491,40 @@ impl Core {
         }
     }
 
-    fn send_now(&mut self, id: u64, session_id: Option<Uuid>, message: Message) {
+    /// Seal and hand to socket `id`. Returns the envelope `ts` if the frame was queued on it.
+    fn send_now(&mut self, id: u64, session_id: Option<Uuid>, message: Message) -> Option<u64> {
         let (Some(ch), Some(conn)) = (self.channel.as_mut(), self.conns.get(&id)) else {
             self.dropped += 1;
-            return;
+            return None;
+        };
+        let first_delta = match &message {
+            Message::AnswerDelta(d) if !self.reported.contains(&d.answer_id) => Some(d.answer_id),
+            _ => None,
         };
         match ch.seal(self.clock.now_ms(), session_id, message) {
-            Ok((_, wire)) if wire.len() <= self.cfg.max_frame => {
-                if conn.tx.try_send(ConnOut::Frame(wire)).is_err() {
+            Ok((env, wire)) if wire.len() <= self.cfg.max_frame => {
+                let note = first_delta.map(|answer_id| SentNote {
+                    answer_id,
+                    path: conn.path,
+                    clock: self.clock.clone(),
+                    tx: self.frame_sent_tx.clone(),
+                });
+                if conn.tx.try_send(ConnOut::Frame(wire, note)).is_err() {
                     self.dropped += 1;
+                    return None;
                 }
+                if let Some(a) = first_delta {
+                    if self.reported.len() == REPORTED_CAP {
+                        self.reported.pop_front();
+                    }
+                    self.reported.push_back(a);
+                }
+                Some(env.ts)
             }
-            _ => self.dropped += 1,
+            _ => {
+                self.dropped += 1;
+                None
+            }
         }
     }
 
@@ -483,6 +568,8 @@ impl Core {
                 .conns
                 .values()
                 .any(|c| c.last_rx.is_some_and(|t| now.duration_since(t) <= self.cfg.dead_after)),
+            relay_connected: self.conns.values().any(|c| c.path == LinkPath::Relay),
+            queued: self.pending.len(),
             rtt_ms: self.rtt_ms,
             paired: self.device.is_some(),
             pairing: self.offer.is_some(),

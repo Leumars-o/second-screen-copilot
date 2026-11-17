@@ -99,7 +99,9 @@ pub struct LanTlsOptions {
     pub acme: AcmeDirectory,
     /// Cloudflare API root.
     pub cloudflare_api: String,
-    /// CR-9 (stub): zone id for tokens without Zone:Read. Defaults to `$SSC_CLOUDFLARE_ZONE_ID`.
+    /// CR-9: zone id override for tokens without Zone:Read. Defaults to
+    /// `$SSC_CLOUDFLARE_ZONE_ID`; when `None`, `Config::lan_zone_id` is used, else the zone is
+    /// looked up by name.
     pub zone_id: Option<String>,
     /// `~/.ssc` (certificates go to `<data_dir>/tls/`).
     pub data_dir: PathBuf,
@@ -264,7 +266,12 @@ pub async fn ensure_lan_tls_with(cfg: &Config, secrets: &dyn SecretStore, opts: 
         return fallback(LanTlsError::new(LanTlsStage::Dns, "no LAN IPv4 address"), cached, None, None);
     };
     let cf = CloudflareDns::with_base(token, &opts.cloudflare_api);
-    let (zone, zone_name) = match &opts.zone_id {
+    // CR-9: the option (env override) wins over `Config::lan_zone_id`.
+    let zone_id = opts
+        .zone_id
+        .clone()
+        .or_else(|| cfg.lan_zone_id.as_deref().map(str::trim).filter(|z| !z.is_empty()).map(String::from));
+    let (zone, zone_name) = match &zone_id {
         // Without Zone:Read the name stays unknown; `check_not_apex` then falls back to a heuristic.
         Some(z) => (z.clone(), cf.zone_name(z).await.ok()),
         None => match cf.find_zone_named(&domain).await {

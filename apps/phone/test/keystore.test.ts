@@ -11,7 +11,7 @@ const K2 = "b".repeat(43) + "=";
 const legacy: StoredPairing = {
   pairing: { v: 1, pc_pub: "cGM=", urls: ["wss://lan.example/ws"], room_id: "00", k_pc_to_phone: K1, k_phone_to_pc: K2, created_at: 1 },
   hello: '{"type":"pair.hello"}',
-  confirmed: true,
+  confirmed: false,
 };
 
 function rawRecord(id: string): Promise<unknown> {
@@ -108,9 +108,20 @@ describe("pairing storage (CR-15)", () => {
     expect(await loadPairing()).toBeNull();
   });
 
-  it("a reload after pair.hello went out does not resend it, even if the sealed update was lost", async () => {
+  it("a reload after the PC confirmed pairing does not resend the hello, even if the sealed update was lost", async () => {
     localStorage.setItem(LEGACY_PAIRING_KEY, JSON.stringify(legacy));
-    localStorage.setItem("ssc.link.v1", JSON.stringify({ state: { nextSendSeq: 1, lastRecvSeq: -1 }, sessionId: null, helloSent: true }));
+    localStorage.setItem("ssc.link.v1", JSON.stringify({ state: { nextSendSeq: 1, lastRecvSeq: -1 }, sessionId: null, helloConfirmed: true }));
+    expect((await loadPairing())?.hello).toBeUndefined();
+  });
+
+  it("an unconfirmed pairing keeps its hello across a reload, so it is sent again (L4)", async () => {
+    localStorage.setItem(LEGACY_PAIRING_KEY, JSON.stringify(legacy));
+    localStorage.setItem("ssc.link.v1", JSON.stringify({ state: { nextSendSeq: 1, lastRecvSeq: -1 }, sessionId: null, helloConfirmed: false }));
+    expect((await loadPairing())?.hello).toBe(legacy.hello);
+  });
+
+  it("a confirmed pairing drops a leftover hello", async () => {
+    localStorage.setItem(LEGACY_PAIRING_KEY, JSON.stringify({ ...legacy, confirmed: true }));
     expect((await loadPairing())?.hello).toBeUndefined();
   });
 });
