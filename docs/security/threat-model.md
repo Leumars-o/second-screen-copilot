@@ -59,7 +59,7 @@ Strictly increasing `seq` per direction, persisted per pairing (CR-3).
   `wire_replay_and_tamper_are_not_delivered`; TS: "drops every single-bit flip…".
 - *Replay / reorder / reflection / foreign pairing* → dropped.
   `replays_and_reordering_are_rejected`, `reflected_and_foreign_frames_are_rejected`.
-- *Replay after a PC crash* — **Fixed, CR-11 (low)** — original finding:: `last_recv` is persisted at most once a
+- *Replay after a PC crash* — **Fixed, CR-11 (low)** — original finding: `last_recv` is persisted at most once a
   second, so frames from the last second before a crash are accepted again after restart.
   `replay_window_is_persisted_before_frames_are_delivered` (ignored).
 - *Unpaired device* — frames under other keys are dropped and the socket closed after 8;
@@ -72,7 +72,7 @@ Strictly increasing `seq` per direction, persisted per pairing (CR-3).
 - *Room squatting* — a third socket is refused (409) and rooms are isolated; anyone who learns a
   room id (relay operator) could occupy a slot and deny the relay path. Accepted (availability
   only; LAN still works).
-- *LAN slot exhaustion / cross-origin browsers* — **Fixed, CR-12 (medium)** — original finding:: 8 unauthenticated
+- *LAN slot exhaustion / cross-origin browsers* — **Fixed, CR-12 (medium)** — original finding: 8 unauthenticated
   sockets hold all LAN slots for 15 s each, and the server accepts upgrades from any web Origin,
   so any page in a browser on the PC/Wi-Fi can lock the phone out of the LAN path (relay still
   works). `idle_unauthenticated_sockets_cannot_lock_out_the_phone`,
@@ -95,9 +95,9 @@ Strictly increasing `seq` per direction, persisted per pairing (CR-3).
 - *Client touches other records* — every write is by id of a record found by exact name + type and
   re-filtered client-side, so a lax API cannot widen it (`lax_api_cannot_widen_cloudflare_writes`,
   `cloud_mode_lan_tls_provisions_with_fakes`, `lan_tls.rs::a_record_create_noop_update_touches_nothing_else`).
-  **Fixed, CR-13 (medium)** — original finding:: an existing A record with the configured name — including the zone apex —
+  **Fixed, CR-13 (medium)** — original finding: an existing A record with the configured name — including the zone apex —
   is taken over (re-pointed to the LAN IP). `refuses_to_repoint_records_it_does_not_own` (ignored).
-- *Local-only mode talks to Cloudflare/ACME* — **Fixed, CR-14 (low)** — original finding:: see §6.
+- *Local-only mode talks to Cloudflare/ACME* — **Fixed, CR-14 (low)** — original finding: see §6.
 
 ## 5. Keys never leave the keychain
 
@@ -112,7 +112,7 @@ adapters never copy provider error bodies; the settings page can write but never
   (key only in `Authorization`).
 - `security_frames.rs::debug_output_never_contains_key_material` (identity, tokens, direction keys).
 - `apps/agent/tests/security_ipc.rs` — IPC responses carry only `set: bool` per key.
-- **Fixed, CR-10 (low)** — original finding:: the Jev/TypeSafe adapter appends the provider's `detail.message` to its
+- **Fixed, CR-10 (low)** — original finding: the Jev/TypeSafe adapter appends the provider's `detail.message` to its
   error; a provider echoing the key (or the question text) puts it in the error string. Today the
   trigger engine discards decision errors, so nothing is logged yet.
   `decision_adapter_errors_never_contain_the_key` (ignored).
@@ -132,7 +132,7 @@ Promise (spec): with a local model and local STT, nothing leaves the PC except e
 - Pipeline refuses a cloud post-call model even if misconfigured.
   `security_pipeline.rs::injection_cannot_move_local_only_to_cloud`.
 - Whole-stack: `e2e_local_only.rs` runs under `sandbox-exec` with only loopback allowed.
-- **Fixed, CR-14 (low)** — original finding:: `start_transport` always spawns the LAN TLS manager, which in local-only
+- **Fixed, CR-14 (low)** — original finding: `start_transport` always spawns the LAN TLS manager, which in local-only
   mode still calls the Cloudflare API (publishing the LAN IP) and Let's Encrypt.
   `local_only_mode_makes_no_cloudflare_or_acme_calls` (ignored).
 - Model downloads (§7) also reach Hugging Face once; they carry no user data.
