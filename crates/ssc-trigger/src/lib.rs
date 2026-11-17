@@ -72,6 +72,24 @@ pub struct TriggerEvent {
     pub speech_end_ms: Option<u64>,
 }
 
+/// Speculative-answer notifications (H2). In cloud mode a detected question waits for the
+/// decision model (~0.3–0.6 s); the pipeline uses that time to assemble context and start the
+/// fast model, holding its output until the decision confirms.
+///
+/// - `Start(ev)`: a question candidate is about to be decided. `ev` is the heuristic event
+///   (format/intent from the rules, fast tier, active profile, same `answer_id`). Called
+///   synchronously before the decision call starts, so it always precedes the outcome.
+/// - The outcome is the usual [`TriggerEvent`] with the same `answer_id` (confirm; its
+///   format/tier/profile may differ, then the pipeline restarts), or `Cancel(answer_id)` when
+///   nothing should be shown (no answer, small talk, dedupe, superseded by the hotkey).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Speculation {
+    Start(TriggerEvent),
+    Cancel(Uuid),
+}
+
+pub type SpeculationFn = Arc<dyn Fn(Speculation) + Send + Sync>;
+
 /// A background decision for an answer that already fired (offline mode).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Tag {
@@ -227,6 +245,9 @@ struct State {
     answered: HashMap<String, u64>,
     /// Latest decision and the normalised utterance it was for (hotkey tier).
     last_decision: Option<(String, Decision)>,
+    /// normalised utterance → last hotkey time (L6: an in-flight automatic decision for the
+    /// same utterance is dropped once the hotkey answered it).
+    hotkeyed: HashMap<String, u64>,
 }
 
 /// A trigger that fired and still needs its decision step.
@@ -246,6 +267,7 @@ pub struct TriggerEngine {
     clock: Arc<dyn Clock>,
     timing: Option<Arc<Timing>>,
     tags: Option<mpsc::UnboundedSender<Tag>>,
+    speculation: Option<SpeculationFn>,
     state: Mutex<State>,
 }
 
@@ -258,6 +280,7 @@ impl TriggerEngine {
             clock,
             timing: None,
             tags: None,
+            speculation: None,
             state: Mutex::new(State { next_timer_ms, ..State::default() }),
         }
     }
@@ -271,6 +294,12 @@ impl TriggerEngine {
     /// Receive background decisions for answers that fired without waiting for one (offline).
     pub fn with_tag_sink(mut self, tx: mpsc::UnboundedSender<Tag>) -> Self {
         self.tags = Some(tx);
+        self
+    }
+
+    /// Get [`Speculation`] notifications for cloud-mode question triggers (H2).
+    pub fn with_speculation(mut self, f: SpeculationFn) -> Self {
+        self.speculation = Some(f);
         self
     }
 
@@ -311,7 +340,8 @@ impl TriggerEngine {
         let format = format_for(intent).unwrap_or(AnswerFormat::Cue);
         let profile = decision.as_ref().and_then(|d| valid_profile(&s, d)).unwrap_or_else(|| s.active_profile.clone());
         if !key.is_empty() {
-            st.answered.insert(key, now);
+            st.answered.insert(key.clone(), now);
+            st.hotkeyed.insert(key, now);
         }
         // An explicit answer supersedes a pending automatic one for the same speech.
         st.pending_question = None;
@@ -458,6 +488,7 @@ impl TriggerEngine {
         let now = self.clock.now_ms();
         let mut st = self.state.lock().unwrap();
         st.answered.retain(|_, t| now.saturating_sub(*t) < s.dedupe_window_ms);
+        st.hotkeyed.retain(|_, t| now.saturating_sub(*t) < s.dedupe_window_ms);
         let mut out = vec![];
 
         if st.pending_question.as_ref().is_some_and(|p| now >= p.deadline_ms) {
@@ -520,19 +551,48 @@ impl TriggerEngine {
     async fn resolve(&self, c: Candidate) -> Option<TriggerEvent> {
         let s = self.settings();
         if c.trigger == Trigger::Question && s.mode == Mode::Local {
-            // Offline: fire from the end-of-question rule; tag in the background.
-            self.spawn_background_tag(&c, &s);
+            // Offline: fire from the end-of-question rule; tag in the background, but only when
+            // someone consumes the tag (M5: no discarded local inference per question).
+            if self.tags.is_some() {
+                self.spawn_background_tag(&c, &s);
+            }
             return heuristic_event(&c, &s);
         }
-        match self.decide(&c, &s).await {
+        let spec = match (&self.speculation, c.trigger) {
+            (Some(f), Trigger::Question) => heuristic_event(&c, &s).map(|ev| (f.clone(), ev)),
+            _ => None,
+        };
+        if let Some((f, ev)) = &spec {
+            f(Speculation::Start(ev.clone()));
+        }
+        let out = self.decided(&c, &s).await.filter(|_| !self.superseded(&c));
+        if out.is_none()
+            && let Some((f, _)) = &spec
+        {
+            f(Speculation::Cancel(c.answer_id));
+        }
+        out
+    }
+
+    /// L6: the hotkey answered this utterance after the candidate fired.
+    fn superseded(&self, c: &Candidate) -> bool {
+        if c.trigger != Trigger::Question {
+            return false;
+        }
+        let key = normalize(&c.question);
+        self.state.lock().unwrap().hotkeyed.get(&key).is_some_and(|t| *t >= c.t_ms)
+    }
+
+    async fn decided(&self, c: &Candidate, s: &TriggerSettings) -> Option<TriggerEvent> {
+        match self.decide(c, s).await {
             Some(d) => {
                 if c.trigger == Trigger::Question {
                     self.state.lock().unwrap().last_decision = Some((normalize(&c.question), d.clone()));
                 }
-                decided_event(&c, &s, d)
+                decided_event(c, s, d)
             }
             // A failed decision never blocks a detected question; screen/timer stay quiet.
-            None if c.trigger == Trigger::Question => heuristic_event(&c, &s),
+            None if c.trigger == Trigger::Question => heuristic_event(c, s),
             None => None,
         }
     }

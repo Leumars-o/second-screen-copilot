@@ -5,7 +5,7 @@
 //! Ollama is deliberately *not* on this adapter; see [`super::ollama`] for why.
 
 use super::{model_id, warm_get};
-use crate::http::{Step, StreamParser, drive};
+use crate::http::{Step, StreamParser, drive_with_idle};
 use crate::wire::SseDecoder;
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
@@ -14,6 +14,7 @@ use ssc_core::secrets::Secret;
 use ssc_core::traits::{AnswerModel, Cancel};
 use ssc_core::types::{Prompt, StreamStats, Token};
 use ssc_core::{Result, SscError};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 pub const GROQ_BASE_URL: &str = "https://api.groq.com/openai/v1";
@@ -30,7 +31,16 @@ pub struct OpenAiCompat {
     client: reqwest::Client,
     /// Provider-specific body fields merged into every request.
     extra: Map<String, Value>,
+    /// Added to `max_tokens` for reasoning models, whose hidden reasoning tokens count against
+    /// the completion limit (L9): the prompt's cap then limits the visible answer, and a small
+    /// cap ("shorter") can't be eaten by reasoning and return an empty answer.
+    reasoning_headroom: u32,
+    /// Inter-chunk idle timeout ([`crate::http::DEFAULT_IDLE_TIMEOUT`]).
+    idle: Duration,
 }
+
+/// Reasoning headroom for Groq reasoning models at `reasoning_effort: "low"`.
+pub const GROQ_REASONING_HEADROOM: u32 = 256;
 
 impl OpenAiCompat {
     pub fn new(provider: &str, base_url: &str, model: &str, key: Secret) -> Self {
@@ -41,7 +51,14 @@ impl OpenAiCompat {
             key,
             client: crate::http::client(),
             extra: Map::new(),
+            reasoning_headroom: 0,
+            idle: crate::http::DEFAULT_IDLE_TIMEOUT,
         }
+    }
+
+    pub fn with_idle_timeout(mut self, idle: Duration) -> Self {
+        self.idle = idle;
+        self
     }
 
     /// Groq. Reasoning models are told to think briefly and not stream their reasoning, so the
@@ -52,8 +69,10 @@ impl OpenAiCompat {
         if lower.contains("gpt-oss") {
             m.extra.insert("reasoning_effort".into(), json!("low"));
             m.extra.insert("include_reasoning".into(), json!(false));
+            m.reasoning_headroom = GROQ_REASONING_HEADROOM;
         } else if lower.contains("qwen") {
             m.extra.insert("reasoning_format".into(), json!("hidden"));
+            m.reasoning_headroom = GROQ_REASONING_HEADROOM;
         }
         m
     }
@@ -95,7 +114,7 @@ impl OpenAiCompat {
                 { "role": "user", "content": p.dynamic },
             ],
             "stream": true,
-            "max_tokens": p.max_tokens,
+            "max_tokens": p.max_tokens.saturating_add(self.reasoning_headroom),
             "temperature": p.temperature,
         });
         if !p.stop.is_empty() {
@@ -127,7 +146,7 @@ impl AnswerModel for OpenAiCompat {
             .post(format!("{}/chat/completions", self.base_url))
             .bearer_auth(self.key.expose())
             .json(&self.body(prompt));
-        drive(&self.id, req, ChatSse::default(), &tx, &cancel).await
+        drive_with_idle(&self.id, req, ChatSse::default(), &tx, &cancel, self.idle).await
     }
 }
 
@@ -221,8 +240,10 @@ mod tests {
         assert_eq!(b["messages"][0]["content"], "P");
         assert_eq!(b["messages"][1]["content"], "D");
         assert_eq!(b["stream"], true);
-        assert_eq!(b["max_tokens"], 80);
+        // Reasoning tokens count against the limit: 80 answer tokens + headroom (L9).
+        assert_eq!(b["max_tokens"], 80 + GROQ_REASONING_HEADROOM);
         assert_eq!(b["reasoning_effort"], "low");
+        assert_eq!(b["include_reasoning"], false);
         assert_eq!(b["stop"][0], "\n\n\n");
         assert!(b.get("stream_options").is_none());
         assert_eq!(m.id(), "groq/openai/gpt-oss-120b");

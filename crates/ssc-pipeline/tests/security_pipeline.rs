@@ -441,6 +441,7 @@ fn only_reviewed_code_writes_files() {
         "crates/ssc-core/src/timing.rs",            // timing JSONL (ids, stages, ms only)
         "crates/ssc-memory/src/download.rs",        // pinned model downloads
         "crates/ssc-pipeline/src/transport.rs",     // paired device id (a public-key hash)
+        "crates/ssc-pipeline/src/timing_log.rs",    // daily timing JSONL (ids, stages, ms only)
         "crates/ssc-transport/src/lan_tls/cert.rs", // public certificate chain; key in keychain
     ];
     let root = workspace_root();

@@ -1,6 +1,7 @@
 //! Tauri shell: tray icon, global hotkeys, settings window and the commands the page calls.
 //! All logic lives in `ssc-pipeline` (and `settings.rs` for UI rules); this file is glue.
 
+use crate::slot::Slot;
 use crate::{permissions, settings};
 use serde::Serialize;
 use ssc_core::config::{Config, data_dir};
@@ -20,7 +21,8 @@ const TRAY_ID: &str = "ssc";
 
 pub struct AppState {
     cfg: Mutex<Config>,
-    system: tokio::sync::Mutex<Option<System>>,
+    /// H3: readers clone the `Arc` out; nothing holds a lock across an await on the system.
+    system: Slot<System>,
     secrets: Arc<dyn SecretStore>,
     tray_visible: AtomicBool,
     last_error: Mutex<Option<String>>,
@@ -38,6 +40,23 @@ fn err(e: impl std::fmt::Display) -> String {
 
 impl AppState {
     async fn start_system(&self) {
+        let _l = self.system.lifecycle().await;
+        self.start_locked().await;
+    }
+
+    async fn stop_system(&self) {
+        let _l = self.system.lifecycle().await;
+        self.stop_locked().await;
+    }
+
+    async fn restart(&self) {
+        let _l = self.system.lifecycle().await;
+        self.stop_locked().await;
+        self.start_locked().await;
+    }
+
+    /// Caller holds the lifecycle lock.
+    async fn start_locked(&self) {
         let cfg = self.cfg.lock().unwrap().clone();
         let dl = self.download.clone();
         let progress = move |p: ssc_memory::download::Progress<'_>| {
@@ -45,12 +64,13 @@ impl AppState {
         };
         let r = system::build(cfg, self.secrets.clone(), &progress).await;
         *self.download.lock().unwrap() = None;
-        let mut slot = self.system.lock().await;
         match r {
             Ok(s) => {
                 *self.last_error.lock().unwrap() = None;
                 let need_whisper = system::needs_whisper_download(&s);
-                *slot = Some(s);
+                if let Some(old) = self.system.replace(Some(Arc::new(s))) {
+                    shutdown(&self.secrets, old).await;
+                }
                 if need_whisper {
                     self.spawn_whisper_download();
                 }
@@ -58,18 +78,19 @@ impl AppState {
             Err(e) => {
                 eprintln!("[ssc-agent] agent failed to start: {e}");
                 *self.last_error.lock().unwrap() = Some(e.to_string());
-                *slot = None;
+                if let Some(old) = self.system.take() {
+                    shutdown(&self.secrets, old).await;
+                }
             }
         }
     }
 
-    async fn stop_system(&self) {
-        if let Some(s) = self.system.lock().await.take() {
-            s.pipeline.shutdown().await;
-            if let Some(dev) = s.transport.device_snapshot().await {
-                let _ = store_device(&*self.secrets, &data_dir(), &dev);
-            }
-            s.transport.shutdown();
+    /// Caller holds the lifecycle lock. The slot is emptied first, so readers see "not running"
+    /// at once instead of waiting for the shutdown (H3).
+    async fn stop_locked(&self) {
+        let taken = self.system.take();
+        if let Some(s) = taken {
+            shutdown(&self.secrets, s).await;
         }
     }
 
@@ -91,7 +112,7 @@ impl AppState {
                 Ok(_) => {
                     *st.download.lock().unwrap() = None;
                     // Don't cut a running call short; the next restart picks the model up.
-                    let capturing = st.system.lock().await.as_ref().is_some_and(|s| s.pipeline.is_capturing());
+                    let capturing = st.system.get().is_some_and(|s| s.pipeline.is_capturing());
                     if !capturing {
                         st.restart().await;
                     }
@@ -100,11 +121,15 @@ impl AppState {
             }
         });
     }
+}
 
-    async fn restart(&self) {
-        self.stop_system().await;
-        self.start_system().await;
+async fn shutdown(secrets: &Arc<dyn SecretStore>, s: Arc<System>) {
+    s.pipeline.shutdown().await;
+    if let Some(dev) = s.transport.device_snapshot().await {
+        let _ = store_device(&**secrets, &data_dir(), &dev);
     }
+    s.transport.shutdown();
+    s.background.cancel();
 }
 
 fn progress_text(what: &str, p: &ssc_memory::download::Progress<'_>) -> String {
@@ -147,7 +172,7 @@ struct StateView {
 #[tauri::command]
 async fn get_state(st: State<'_, AppState>) -> Res<StateView> {
     let config = st.cfg.lock().unwrap().clone();
-    let sys = st.system.lock().await;
+    let sys = st.system.get();
     let keys = settings::UI_SECRETS
         .iter()
         .map(|(name, label)| KeyView {
@@ -217,7 +242,7 @@ async fn set_secret(st: State<'_, AppState>, name: String, value: String) -> Res
 }
 
 async fn memory(st: &AppState) -> Res<Arc<ssc_memory::SqliteMemory>> {
-    st.system.lock().await.as_ref().map(|s| s.memory.clone()).ok_or_else(|| "agent not running".into())
+    st.system.get().map(|s| s.memory.clone()).ok_or_else(|| "agent not running".into())
 }
 
 #[tauri::command]
@@ -279,8 +304,7 @@ async fn delete_doc(st: State<'_, AppState>, id: String) -> Res<()> {
 
 async fn toggle_capture_inner(app: &AppHandle, profile: Option<String>) -> Res<bool> {
     let st = app.state::<AppState>();
-    let sys = st.system.lock().await;
-    let s = sys.as_ref().ok_or("agent not running")?;
+    let s = st.system.get().ok_or("agent not running")?;
     let capturing = if s.pipeline.is_capturing() {
         let p = s.pipeline.clone();
         // Summary + follow-up can take a while: don't hold the UI.
@@ -294,7 +318,6 @@ async fn toggle_capture_inner(app: &AppHandle, profile: Option<String>) -> Res<b
         s.pipeline.start_session(profile).await.map_err(err)?;
         true
     };
-    drop(sys);
     update_tray(app, capturing);
     Ok(capturing)
 }
@@ -306,14 +329,13 @@ async fn toggle_capture(app: AppHandle, profile: Option<String>) -> Res<bool> {
 
 #[tauri::command]
 async fn answer_now(st: State<'_, AppState>) -> Res<Option<String>> {
-    let sys = st.system.lock().await;
-    Ok(sys.as_ref().and_then(|s| s.pipeline.answer_now()).map(|u| u.to_string()))
+    Ok(st.system.get().and_then(|s| s.pipeline.answer_now()).map(|u| u.to_string()))
 }
 
 #[tauri::command]
 async fn begin_pairing(st: State<'_, AppState>) -> Res<String> {
-    let sys = st.system.lock().await;
-    let s = sys.as_ref().ok_or("agent not running")?;
+    // H3: a clone, so the up-to-90 s wait below never blocks hotkeys or get_state.
+    let s = st.system.get().ok_or("agent not running")?;
     // The QR carries the LAN URL: wait for LAN TLS to settle so it is wss:// when available.
     ssc_pipeline::transport::wait_lan_tls_settled(&s.lan_tls, std::time::Duration::from_secs(90)).await;
     let qr = s.transport.begin_pairing().await.map_err(err)?;
@@ -322,15 +344,16 @@ async fn begin_pairing(st: State<'_, AppState>) -> Res<String> {
 
 #[tauri::command]
 async fn unpair(st: State<'_, AppState>) -> Res<()> {
-    st.stop_system().await;
-    revoke_device(&*st.secrets, &data_dir()).map_err(err)?;
-    st.start_system().await;
-    Ok(())
+    let _l = st.system.lifecycle().await;
+    st.stop_locked().await;
+    let revoked = revoke_device(&*st.secrets, &data_dir()).map_err(err);
+    st.start_locked().await;
+    revoked
 }
 
 #[tauri::command]
 async fn debug_stats(st: State<'_, AppState>) -> Res<Vec<ssc_pipeline::StageStat>> {
-    Ok(st.system.lock().await.as_ref().map(|s| s.pipeline.stage_stats()).unwrap_or_default())
+    Ok(st.system.get().map(|s| s.pipeline.stage_stats()).unwrap_or_default())
 }
 
 #[tauri::command]
@@ -381,7 +404,7 @@ fn on_hotkey(app: &AppHandle, action: Hotkey) {
             }
             Hotkey::Answer => {
                 let st = app.state::<AppState>();
-                if let Some(s) = st.system.lock().await.as_ref() {
+                if let Some(s) = st.system.get() {
                     s.pipeline.answer_now();
                 }
             }
@@ -422,7 +445,7 @@ pub fn run() {
     });
     let state = AppState {
         cfg: Mutex::new(cfg.clone()),
-        system: tokio::sync::Mutex::new(None),
+        system: Slot::default(),
         secrets: Arc::new(KeychainStore),
         tray_visible: AtomicBool::new(true),
         last_error: Mutex::new(None),

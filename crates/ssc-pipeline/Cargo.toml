@@ -31,11 +31,12 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 tokio-util.workspace = true
 uuid.workspace = true
+# The loopback phone client for `bench latency --live` (replay through the real PcTransport).
+tokio-tungstenite = "0.30"
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "net", "io-util", "process"] }
-tokio-tungstenite = "0.30"
-futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
 
 [lints]
 workspace = true

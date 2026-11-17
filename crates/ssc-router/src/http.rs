@@ -11,13 +11,16 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::time::Instant;
 
+/// Idle pooled connections are dropped after this ([`crate::warm::REWARM_EVERY`] is shorter).
+pub const POOL_IDLE: Duration = Duration::from_secs(300);
+
 /// A client tuned for low first-token latency: kept-alive pooled connections (HTTP/2 when the
 /// server offers it via ALPN), TCP_NODELAY, rustls.
 pub fn client() -> reqwest::Client {
     reqwest::Client::builder()
         .use_rustls_tls()
         .connect_timeout(Duration::from_secs(3))
-        .pool_idle_timeout(Duration::from_secs(300))
+        .pool_idle_timeout(POOL_IDLE)
         .pool_max_idle_per_host(4)
         .tcp_keepalive(Duration::from_secs(30))
         .tcp_nodelay(true)
@@ -120,14 +123,34 @@ async fn cancellable<T>(cancel: &Cancel, f: impl std::future::Future<Output = T>
     }
 }
 
+/// Longest gap between two body chunks once the response has started (M3). A provider that stalls
+/// mid-stream returns `Timeout` instead of hanging the answer: before any text was forwarded the
+/// router fails over, after that it ends the answer with what it has.
+///
+/// Not applied to the wait for the response headers: Ollama sends them only once the model is
+/// loaded (seconds on a cold load), and cloud routes have the router's first-token deadline.
+pub const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(8);
+
 /// Send `req`, then stream parsed text to `tx` until the body ends, the parser says done, or
 /// `cancel` fires. Dropping the response on cancel closes the stream immediately.
 pub async fn drive(
     model_id: &str,
     req: RequestBuilder,
+    parser: impl StreamParser,
+    tx: &mpsc::Sender<Token>,
+    cancel: &Cancel,
+) -> Result<StreamStats> {
+    drive_with_idle(model_id, req, parser, tx, cancel, DEFAULT_IDLE_TIMEOUT).await
+}
+
+/// [`drive`] with an explicit inter-chunk idle timeout.
+pub async fn drive_with_idle(
+    model_id: &str,
+    req: RequestBuilder,
     mut parser: impl StreamParser,
     tx: &mpsc::Sender<Token>,
     cancel: &Cancel,
+    idle: Duration,
 ) -> Result<StreamStats> {
     let start = Instant::now();
     let ms = |s: Instant| s.elapsed().as_millis() as u64;
@@ -150,7 +173,11 @@ pub async fn drive(
     let mut count = 0u32;
     let mut reported = None;
     loop {
-        let (step, end) = match cancellable(cancel, resp.chunk()).await? {
+        let chunk = match cancellable(cancel, tokio::time::timeout(idle, resp.chunk())).await? {
+            Ok(c) => c,
+            Err(_) => return Err(SscError::Timeout(ms(start))),
+        };
+        let (step, end) = match chunk {
             Ok(Some(b)) => (parser.feed(&b)?, false),
             Ok(None) => (parser.finish()?, true),
             Err(e) => return Err(map_reqwest(e, ms(start))),

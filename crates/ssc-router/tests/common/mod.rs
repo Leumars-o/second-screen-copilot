@@ -161,3 +161,13 @@ async fn read_request(sock: &mut tokio::net::TcpStream) -> Option<Recorded> {
     }
     Some(Recorded { method, path, headers, body })
 }
+
+impl Reply {
+    /// Delay before the last chunk (a mid-stream stall).
+    pub fn delay_last(mut self, d: Duration) -> Self {
+        if let Some(last) = self.chunks.last_mut() {
+            last.0 = d;
+        }
+        self
+    }
+}

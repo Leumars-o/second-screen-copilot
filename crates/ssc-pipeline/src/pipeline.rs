@@ -6,10 +6,30 @@
 //!   loop, and every answer started during the session.
 //!
 //! Each answer runs in its own task, so a slow model never blocks the hotkey or new triggers.
+//!
+//! ## Parallel hot path (H2)
+//! In cloud mode a detected question waits for the decision model. The trigger engine tells the
+//! pipeline ([`Speculation::Start`]) just before that call, and the pipeline starts the answer at
+//! once — context assembly and the fast-chain stream — with the heuristic format, fast tier and
+//! active profile, but **holds** everything it would send. When the decision confirms with the
+//! same format, profile and (effective) tier, the held deltas are released and the stream goes
+//! on; when it says "no answer" ([`Speculation::Cancel`]) the stream is cancelled and nothing
+//! reaches the phone; when it differs, the speculation is dropped and a normal answer starts.
+//! Speculation is skipped when [`AnswerRouter::speculation_allowed`] says the Groq budget is
+//! getting tight. Redaction applies as for every answer (it is in the router). The hotkey path
+//! never waits for a decision.
+//!
+//! Timing for a held answer: `context_ready`, `model_request` and `first_token` keep their true
+//! times (they may precede `decision_done`); they are written to the timing log only once the
+//! answer is confirmed, so cancelled speculation leaves no events. `frame_sent` is always after
+//! `decision_done`.
+//!
+//! `answer.start` is sent right before the first delta (or before `answer.end` if no delta came),
+//! so its `model` is the model that actually produced the answer, after any failover (L3).
 
 use crate::limits;
 use crate::postcall::{self, ShownAnswer};
-use ssc_context::{Budget, ContextInput, PromptKind, assemble, retrieve_and_assemble};
+use ssc_context::{Budget, ContextInput, Known, KnownKind, PromptKind, assemble, retrieve_and_assemble};
 use ssc_core::config::Config;
 use ssc_core::decision::Tier;
 use ssc_core::protocol::{
@@ -25,20 +45,44 @@ use ssc_core::types::{Prompt, ScreenSnapshot, TranscriptSegment};
 use ssc_core::{Result, SscError};
 use ssc_memory::{AnswerRecord, SqliteMemory};
 use ssc_router::grammar::{ParsedAnswer, merge_detail};
-use ssc_router::{AnswerRouter, RoutedDelta};
-use ssc_trigger::{TriggerEngine, TriggerEvent, TriggerInput, TriggerSettings, format_for};
+use ssc_router::warm::REWARM_EVERY;
+use ssc_router::{AnswerRouter, RoutedDelta, Warmer};
+use ssc_trigger::{Speculation, TriggerEngine, TriggerEvent, TriggerInput, TriggerSettings, format_for};
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 pub type RttFn = Arc<dyn Fn() -> Option<u64> + Send + Sync>;
 pub type GateFn = Arc<dyn Fn() -> bool + Send + Sync>;
 pub type Hook = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+/// "May the background tagger run now?" (M5): true only when the decision model can run without
+/// making Ollama swap out the live answer model.
+pub type TagGate = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>;
+
+/// The transport wrote an answer's first `answer.delta` to the socket (`frame_sent`, §4.6).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameSentEvent {
+    pub answer_id: Uuid,
+    pub t_ms: u64,
+}
+
+/// Optional parts (all off by default; tests and the bench leave them unset).
+#[derive(Default)]
+pub struct Extras {
+    /// Provider warm-up at session start and while capturing (M2).
+    pub warm: Option<Warmer>,
+    /// Enables the background decision tag for answers fired without one (offline/local, M5).
+    pub tag_gate: Option<TagGate>,
+    /// `frame_sent` from the transport (first delta written to the socket). Without it the
+    /// pipeline stamps `frame_sent` when `Transport::send` of the first delta returns.
+    pub frame_sent: Option<mpsc::Receiver<FrameSentEvent>>,
+}
 
 /// Every component the pipeline drives. Real ones come from [`crate::system`]; tests use mocks.
 pub struct Parts {
@@ -73,6 +117,12 @@ pub struct Settings {
     pub postcall_timeout: Duration,
     /// Doc chunks retrieved per answer (spec: 3–5).
     pub retrieve_k: usize,
+    /// Start cloud question answers while the decision runs (H2). On by default.
+    pub speculate: bool,
+    /// Timeout of a background tag decision (not on the live path).
+    pub tag_timeout: Duration,
+    /// Re-warm interval while capturing (below the HTTP pool's idle drop).
+    pub rewarm_every: Duration,
 }
 
 impl Settings {
@@ -82,9 +132,17 @@ impl Settings {
             screen_poll: Duration::from_millis(1000),
             postcall_timeout: Duration::from_secs(180),
             retrieve_k: 5,
+            speculate: true,
+            tag_timeout: Duration::from_secs(5),
+            rewarm_every: REWARM_EVERY,
         }
     }
 }
+
+/// Answers remembered for phone commands (regenerate, shorter, …); the oldest are dropped (L2).
+const MAX_REMEMBERED_ANSWERS: usize = 256;
+/// `first_frame` entries the phone never reported a paint time for are dropped after this (L2).
+const FIRST_FRAME_TTL_MS: u64 = 5 * 60_000;
 
 /// What a finished (or in-flight) answer needs for phone commands.
 #[derive(Debug, Clone)]
@@ -111,11 +169,14 @@ struct Job {
     shorter: bool,
     /// "Expand all": the cues being expanded.
     expand: Option<Vec<Cue>>,
+    /// Fired without a decision in local/offline mode: tag it in the background (M5).
+    tag: bool,
 }
 
 impl Job {
     fn from_event(ev: TriggerEvent) -> Self {
         Self {
+            tag: false,
             answer_id: ev.answer_id,
             trigger: ev.trigger,
             question: ev.question,
@@ -153,14 +214,40 @@ struct Live {
     shown: Vec<ShownAnswer>,
 }
 
+/// What a held (speculative) answer is waiting for.
+#[derive(Debug, Clone)]
+enum Gate {
+    Hold,
+    /// Confirmed; the job carries the decision's tags (intent, urgency, trigger fields).
+    Go(Box<Job>),
+    Drop,
+}
+
+struct Spec {
+    job: Job,
+    gate: watch::Sender<Gate>,
+}
+
 struct Inner {
     parts: Parts,
     settings: Settings,
     session: tokio::sync::Mutex<Option<Session>>,
     live: Mutex<Live>,
-    answers: Mutex<HashMap<Uuid, AnswerMeta>>,
+    /// answer_id → (insertion seq, meta).
+    answers: Mutex<HashMap<Uuid, (u64, AnswerMeta)>>,
+    answer_seq: AtomicU64,
     /// answer_id → `frame_sent` of its first delta (for `phone_rendered`).
     first_frame: Mutex<HashMap<Uuid, u64>>,
+    /// Held speculative answers by answer_id (H2).
+    speculative: Mutex<HashMap<Uuid, Spec>>,
+    /// Answers currently running (the background tagger waits for 0).
+    active_answers: AtomicUsize,
+    /// Last time a model request started (re-warm only when idle).
+    last_model_use: AtomicU64,
+    warm: Option<Warmer>,
+    tag_gate: Option<TagGate>,
+    /// `frame_sent` comes from the transport, not from `send()` returning.
+    external_frame_sent: bool,
     cancel: CancellationToken,
 }
 
@@ -171,6 +258,9 @@ pub struct Pipeline {
 }
 
 const SHORTER_NOTE: &str = "\nThe user tapped \"shorter\": output exactly 3 cues and no \"---\" detail block.\n";
+/// "Shorter" caps the visible answer (3 cues of 2–6 words fit easily).
+const SHORTER_MAX_TOKENS: u32 = 60;
+const SHORTER_CUES: usize = 3;
 const TRANSCRIPT_CONTEXT_SEGMENTS: usize = 200;
 
 fn log(msg: impl AsRef<str>) {
@@ -180,17 +270,33 @@ fn log(msg: impl AsRef<str>) {
 impl Pipeline {
     /// Starts the phone command loop. Capture starts with [`Pipeline::start_session`].
     pub fn new(parts: Parts, settings: Settings) -> Self {
+        Self::with_extras(parts, settings, Extras::default())
+    }
+
+    /// [`Pipeline::new`] with warm-up, background tagging and transport `frame_sent`.
+    pub fn with_extras(parts: Parts, settings: Settings, extras: Extras) -> Self {
         parts.memory.set_keep_transcripts(settings.config.keep_transcripts);
         let incoming = parts.transport.take_incoming();
+        let Extras { warm, tag_gate, frame_sent } = extras;
         let inner = Arc::new(Inner {
             parts,
             settings,
             session: tokio::sync::Mutex::new(None),
             live: Mutex::new(Live::default()),
             answers: Mutex::new(HashMap::new()),
+            answer_seq: AtomicU64::new(0),
             first_frame: Mutex::new(HashMap::new()),
+            speculative: Mutex::new(HashMap::new()),
+            active_answers: AtomicUsize::new(0),
+            last_model_use: AtomicU64::new(0),
+            warm,
+            tag_gate,
+            external_frame_sent: frame_sent.is_some(),
             cancel: CancellationToken::new(),
         });
+        if let Some(rx) = frame_sent {
+            tokio::spawn(frame_sent_loop(inner.clone(), rx));
+        }
         match incoming {
             Some(rx) => {
                 tokio::spawn(command_loop(inner.clone(), rx));
@@ -241,10 +347,14 @@ impl Pipeline {
 
         let cancel = inner.cancel.child_token();
         let settings = TriggerSettings::from_config(&inner.settings.config, profiles.clone(), active.clone());
-        let engine = Arc::new(
-            TriggerEngine::new(settings, inner.parts.decision.clone(), inner.parts.clock.clone())
-                .with_timing(inner.parts.timing.clone()),
-        );
+        let mut engine = TriggerEngine::new(settings, inner.parts.decision.clone(), inner.parts.clock.clone())
+            .with_timing(inner.parts.timing.clone());
+        if inner.settings.speculate {
+            // Weak: the engine lives in `inner.live`, so a strong ref would be a cycle.
+            let weak = Arc::downgrade(inner);
+            engine = engine.with_speculation(Arc::new(move |s| on_speculation(&weak, s)));
+        }
+        let engine = Arc::new(engine);
         sync_trigger_mode(inner, &engine);
         {
             let mut live = inner.live.lock().unwrap();
@@ -260,6 +370,9 @@ impl Pipeline {
             .await;
 
         let mut tasks = Vec::new();
+        if let Some(w) = inner.warm.clone() {
+            tasks.push(tokio::spawn(warm_loop(inner.clone(), w, active.clone(), cancel.clone())));
+        }
         let (in_tx, in_rx) = mpsc::channel::<TriggerInput>(256);
         let (ev_tx, ev_rx) = mpsc::channel::<TriggerEvent>(64);
         tasks.push(engine.clone().spawn(in_rx, ev_tx, cancel.clone()));
@@ -309,6 +422,7 @@ impl Pipeline {
         let inner = &self.inner;
         let Some(session) = inner.session.lock().await.take() else { return Ok(None) };
         session.cancel.cancel();
+        inner.speculative.lock().unwrap().clear(); // held answers end with the session token
         for t in session.tasks {
             let _ = t.await;
         }
@@ -350,6 +464,7 @@ impl Pipeline {
         let inner = &self.inner;
         let Some(session) = inner.session.lock().await.take() else { return };
         session.cancel.cancel();
+        inner.speculative.lock().unwrap().clear();
         for t in session.tasks {
             let _ = t.await;
         }
@@ -427,28 +542,32 @@ async fn transcript_loop(
         if let Some(e) = &engine {
             sync_trigger_mode(&inner, e);
         }
-        let text = seg.text.trim();
+        let text = seg.text.trim().to_string();
+        let keep = seg.is_final && !text.is_empty();
+        // L1: the trigger engine gets the segment first (its silence window starts now); the
+        // context copy is updated before that so an answer it fires sees this segment. Phone
+        // echo and the (opt-in) transcript store come after.
+        if keep {
+            inner.live.lock().unwrap().transcript.push(seg.clone());
+        }
+        if trig.send(TriggerInput::Transcript(seg.clone())).await.is_err() {
+            break;
+        }
         if !text.is_empty() {
             let tp = TranscriptPartial {
                 speaker: seg.speaker,
-                text: limits::clip(text, 4096),
+                text: limits::clip(&text, 4096),
                 is_final: seg.is_final,
                 t0: seg.t0_ms,
                 t1: seg.t1_ms,
             };
             send(&inner, sid, Message::TranscriptPartial(tp)).await;
         }
-        if seg.is_final && !text.is_empty() {
-            inner.live.lock().unwrap().transcript.push(seg.clone());
-            if let Some(sid) = sid {
-                let (mem, s) = (inner.parts.memory.clone(), seg.clone());
-                if let Err(e) = blocking(move || mem.record_transcript(sid, &s)).await {
-                    log(format!("transcript store failed: {e}"));
-                }
+        if keep && let Some(sid) = sid {
+            let mem = inner.parts.memory.clone();
+            if let Err(e) = blocking(move || mem.record_transcript(sid, &seg)).await {
+                log(format!("transcript store failed: {e}"));
             }
-        }
-        if trig.send(TriggerInput::Transcript(seg)).await.is_err() {
-            break;
         }
     }
 }
@@ -493,7 +612,49 @@ async fn event_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<TriggerEvent>, can
             _ = cancel.cancelled() => break,
             e = rx.recv() => match e { Some(e) => e, None => break },
         };
-        spawn_job(&inner, Job::from_event(ev), cancel.clone());
+        let local = inner.live.lock().unwrap().engine.as_ref().is_some_and(|e| e.mode() == Mode::Local);
+        let tag = local && ev.trigger == Trigger::Question && ev.decision.is_none();
+        let job = Job { tag, ..Job::from_event(ev) };
+        dispatch(&inner, job, cancel.clone());
+    }
+}
+
+/// Warm the answer providers at session start, then keep them warm while capturing (M2).
+async fn warm_loop(inner: Arc<Inner>, w: Warmer, profile: String, cancel: CancellationToken) {
+    // A local answer model also gets the session's fixed cue prefix in its KV cache.
+    let prefix = if inner.settings.config.mode == Mode::Local {
+        let mem = inner.parts.memory.clone();
+        let r = blocking(move || {
+            let input =
+                ContextInput { about_me: mem.about_me()?, profile: mem.profile(&profile)?, ..Default::default() };
+            Ok(assemble(PromptKind::Cue, &input, &Budget::local()).prompt.prefix)
+        })
+        .await;
+        r.ok()
+    } else {
+        None
+    };
+    tokio::select! {
+        _ = cancel.cancelled() => return,
+        _ = w.warm(prefix.as_deref()) => {}
+    }
+    let every = inner.settings.rewarm_every;
+    let mut tick = tokio::time::interval(every);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    tick.tick().await; // the first tick is immediate
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => return,
+            _ = tick.tick() => {}
+        }
+        let idle = inner.parts.clock.now_ms().saturating_sub(inner.last_model_use.load(Ordering::Relaxed));
+        // An answer in the last interval kept the connection (and the local model) warm.
+        if u128::from(idle) >= every.as_millis() {
+            tokio::select! {
+                _ = cancel.cancelled() => return,
+                _ = w.warm(prefix.as_deref()) => {}
+            }
+        }
     }
 }
 
@@ -501,15 +662,214 @@ async fn event_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<TriggerEvent>, can
 
 fn spawn_job(inner: &Arc<Inner>, job: Job, cancel: CancellationToken) {
     let inner = inner.clone();
-    tokio::spawn(async move { run_answer(inner, job, cancel).await });
+    tokio::spawn(async move { run_answer(inner, job, cancel, None).await });
+}
+
+/// A trigger event: release its held speculative answer if that one fits, else start one.
+fn dispatch(inner: &Arc<Inner>, job: Job, cancel: CancellationToken) {
+    let spec = inner.speculative.lock().unwrap().remove(&job.answer_id);
+    match spec {
+        Some(s) if same_answer(inner, &s.job, &job) => {
+            s.gate.send_replace(Gate::Go(Box::new(job)));
+        }
+        Some(s) => {
+            s.gate.send_replace(Gate::Drop);
+            spawn_job(inner, job, cancel);
+        }
+        None => spawn_job(inner, job, cancel),
+    }
+}
+
+/// Would `confirmed` produce the same prompt and route as the speculative `held` job?
+fn same_answer(inner: &Inner, held: &Job, confirmed: &Job) -> bool {
+    // Without a strong model both tiers run the fast chain alone.
+    let tier = |j: &Job| if inner.parts.answers.has_strong() { j.tier } else { Tier::Fast };
+    held.format == confirmed.format
+        && held.kind == confirmed.kind
+        && held.profile == confirmed.profile
+        && held.question == confirmed.question
+        && tier(held) == tier(confirmed)
+}
+
+/// The trigger engine's speculation callback (synchronous, before the decision call).
+fn on_speculation(weak: &Weak<Inner>, s: Speculation) {
+    let Some(inner) = weak.upgrade() else { return };
+    match s {
+        Speculation::Start(ev) => {
+            if !inner.parts.answers.speculation_allowed() {
+                return; // budget getting tight: the confirmed answer starts after the decision
+            }
+            let Some(cancel) = inner.live.lock().unwrap().session_cancel.clone() else { return };
+            let job = Job::from_event(ev);
+            let (gate, rx) = watch::channel(Gate::Hold);
+            inner.speculative.lock().unwrap().insert(job.answer_id, Spec { job: job.clone(), gate });
+            let i2 = inner.clone();
+            tokio::spawn(async move { run_answer(i2, job, cancel, Some(rx)).await });
+        }
+        Speculation::Cancel(id) => {
+            if let Some(s) = inner.speculative.lock().unwrap().remove(&id) {
+                s.gate.send_replace(Gate::Drop);
+            }
+        }
+    }
 }
 
 fn numbered_cues(cues: &[String]) -> String {
     cues.iter().enumerate().map(|(i, c)| format!("{}. {c}", i + 1)).collect::<Vec<_>>().join("\n")
 }
 
-async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken) {
+/// Saved contacts and accounts for the context's "known people" cards (M7).
+fn known_entities(mem: &SqliteMemory) -> Result<Vec<Known>> {
+    let mut out = Vec::new();
+    for (layer, kind) in [(Layer::Contact, KnownKind::Contact), (Layer::Account, KnownKind::Account)] {
+        out.extend(mem.list(Some(layer))?.into_iter().map(|i| Known { kind, name: i.title, notes: i.body }));
+    }
+    Ok(out)
+}
+
+/// Timing stages of one answer. While the answer is held they are buffered (true times kept)
+/// and written only when it is confirmed; a dropped speculation leaves no events.
+struct Stamps {
+    held: Option<Vec<(Stage, u64)>>,
+}
+
+impl Stamps {
+    fn record(&mut self, inner: &Inner, id: Uuid, stage: Stage) -> u64 {
+        let t = inner.parts.clock.now_ms();
+        match &mut self.held {
+            Some(v) => v.push((stage, t)),
+            None => inner.parts.timing.record(id, stage, t),
+        }
+        t
+    }
+    fn commit(&mut self, inner: &Inner, id: Uuid) {
+        for (stage, t) in self.held.take().unwrap_or_default() {
+            inner.parts.timing.record(id, stage, t);
+        }
+    }
+}
+
+/// Counts running answers (the background tagger runs only when none is).
+struct Active<'a>(&'a AtomicUsize);
+impl<'a> Active<'a> {
+    fn new(c: &'a AtomicUsize) -> Self {
+        c.fetch_add(1, Ordering::SeqCst);
+        Self(c)
+    }
+}
+impl Drop for Active<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Wait for a held answer's outcome: the confirmed job, or `None` (dropped / session over).
+async fn gate_outcome(g: &mut watch::Receiver<Gate>, cancel: &CancellationToken) -> Option<Job> {
+    loop {
+        match &*g.borrow_and_update() {
+            Gate::Go(j) => return Some((**j).clone()),
+            Gate::Drop => return None,
+            Gate::Hold => {}
+        }
+        tokio::select! {
+            _ = cancel.cancelled() => return None,
+            r = g.changed() => if r.is_err() {
+                return match &*g.borrow() { Gate::Go(j) => Some((**j).clone()), _ => None };
+            },
+        }
+    }
+}
+
+/// Phone-side state of one answer while it streams.
+struct Push {
+    started: bool,
+    first_sent: bool,
+    detail_text: String,
+}
+
+/// `answer.start` (once), naming the model that produced the first token.
+async fn ensure_start(
+    inner: &Inner,
+    job: &Job,
+    sid: Option<Uuid>,
+    model: &watch::Receiver<Option<String>>,
+    p: &mut Push,
+) {
+    if p.started {
+        return;
+    }
+    p.started = true;
+    let model = model.borrow().clone().unwrap_or_else(|| inner.parts.answers.primary_model().to_string());
+    let start = AnswerStart {
+        answer_id: job.answer_id,
+        trigger: job.trigger,
+        format: job.format,
+        intent: job.intent,
+        urgency: job.urgency,
+        model: limits::clip(&model, 128),
+    };
+    send(inner, sid, Message::AnswerStart(start)).await;
+}
+
+async fn push_delta(
+    inner: &Inner,
+    job: &Job,
+    sid: Option<Uuid>,
+    model: &watch::Receiver<Option<String>>,
+    d: RoutedDelta,
+    p: &mut Push,
+) {
+    if d.block == Block::Detail {
+        if job.shorter {
+            return; // "shorter": cues only (L9; the cap alone can't guarantee it)
+        }
+        p.detail_text.push_str(&d.text);
+    }
+    ensure_start(inner, job, sid, model, p).await;
+    for text in limits::split_chars(&d.text, 4096) {
+        send(inner, sid, Message::AnswerDelta(AnswerDelta { answer_id: job.answer_id, block: d.block, text })).await;
+    }
+    if !p.first_sent {
+        p.first_sent = true;
+        if !inner.external_frame_sent {
+            // Without a transport signal, `send()` returning is the closest stand-in.
+            let t = record(inner, job.answer_id, Stage::FrameSent);
+            remember_first_frame(inner, job.answer_id, t);
+        }
+    }
+}
+
+fn remember_first_frame(inner: &Inner, id: Uuid, t: u64) {
+    insert_first_frame(&mut inner.first_frame.lock().unwrap(), id, t);
+}
+
+/// Insert unless present; drop entries older than [`FIRST_FRAME_TTL_MS`] (L2).
+fn insert_first_frame(ff: &mut HashMap<Uuid, u64>, id: Uuid, t: u64) {
+    ff.retain(|_, sent| t.saturating_sub(*sent) < FIRST_FRAME_TTL_MS);
+    ff.entry(id).or_insert(t);
+}
+
+/// `frame_sent` from the transport: the first delta of an answer hit the socket.
+async fn frame_sent_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<FrameSentEvent>) {
+    loop {
+        let ev = tokio::select! {
+            _ = inner.cancel.cancelled() => break,
+            e = rx.recv() => match e { Some(e) => e, None => break },
+        };
+        inner.parts.timing.record(ev.answer_id, Stage::FrameSent, ev.t_ms);
+        remember_first_frame(&inner, ev.answer_id, ev.t_ms);
+    }
+}
+
+async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken, gate: Option<watch::Receiver<Gate>>) {
+    let _active = Active::new(&inner.active_answers);
+    let mut job = job;
     let id = job.answer_id;
+    let mut stamps = Stamps { held: gate.is_some().then(Vec::new) };
+    let mut gate = gate;
+    // Per-answer token: a dropped speculation (or this task ending) stops its model at once.
+    let answer_cancel = cancel.child_token();
+    let _stop_model = answer_cancel.clone().drop_guard();
     let (sid, transcript, screen) = {
         let live = inner.live.lock().unwrap();
         let n = live.transcript.len().saturating_sub(TRANSCRIPT_CONTEXT_SEGMENTS);
@@ -536,6 +896,7 @@ async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken) {
     let assembled = blocking(move || {
         input.about_me = mem.about_me()?;
         input.profile = mem.profile(&profile_id)?;
+        input.known = known_entities(&mem)?;
         let a = retrieve_and_assemble(&*mem, &profile_id, k, kind, input.clone(), &budget)?;
         Ok((a, input))
     })
@@ -544,27 +905,25 @@ async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken) {
         Ok(v) => v,
         Err(e) => {
             log(format!("context assembly failed: {e}"));
+            if let Some(g) = gate.as_mut() {
+                // Speculative: nothing was shown; retry from scratch if the decision confirms.
+                if let Some(j) = gate_outcome(g, &cancel).await {
+                    spawn_job(&inner, Job { answer_id: id, ..j }, cancel);
+                }
+                return;
+            }
             finish(&inner, &job, sid, error_end(id), String::new()).await;
             return;
         }
     };
-    record(&inner, id, Stage::ContextReady);
+    stamps.record(&inner, id, Stage::ContextReady);
 
     let mut prompt: Prompt = assembled.prompt;
     if job.shorter {
         prompt.dynamic.push_str(SHORTER_NOTE);
-        prompt.max_tokens = prompt.max_tokens.min(60);
+        // Visible-answer cap; reasoning models get their own headroom in the adapter (L9).
+        prompt.max_tokens = prompt.max_tokens.min(SHORTER_MAX_TOKENS);
     }
-    let model = inner.parts.answers.models().first().map(|m| m.id().to_string()).unwrap_or_else(|| "unknown".into());
-    let start = AnswerStart {
-        answer_id: id,
-        trigger: job.trigger,
-        format: job.format,
-        intent: job.intent,
-        urgency: job.urgency,
-        model: limits::clip(&model, 128),
-    };
-    send(&inner, sid, Message::AnswerStart(start)).await;
 
     // 5. Route. The strong tier's detail prompt reuses the retrieved chunks.
     let detail_input = ContextInput { chunks: assembled.chunks_used.clone(), ..input };
@@ -574,49 +933,108 @@ async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken) {
         assemble(PromptKind::Expand, &i, &budget).prompt
     };
     let (dtx, mut drx) = mpsc::channel::<RoutedDelta>(64);
+    let (mtx, mrx) = watch::channel::<Option<String>>(None);
     let router = inner.parts.answers.clone();
-    let (tier, c2) = (if job.shorter { Tier::Fast } else { job.tier }, cancel.clone());
-    record(&inner, id, Stage::ModelRequest);
-    let run = tokio::spawn(async move { router.answer(tier, &prompt, detail, dtx, &c2).await });
+    let (tier, c2) = (if job.shorter { Tier::Fast } else { job.tier }, answer_cancel.clone());
+    let t_req = stamps.record(&inner, id, Stage::ModelRequest);
+    inner.last_model_use.store(t_req, Ordering::Relaxed);
+    let mut run =
+        tokio::spawn(async move { router.answer_reporting(tier, &prompt, detail, dtx, &c2, Some(&mtx)).await });
+
+    // Held (speculative): buffer deltas until the decision says go / drop.
+    let mut held: Vec<RoutedDelta> = Vec::new();
+    let mut first_token = false;
+    let mut stream_open = true;
+    let mut early: Option<std::result::Result<Result<ssc_router::AnswerOutcome>, tokio::task::JoinError>> = None;
+    if let Some(g) = gate.as_mut() {
+        let confirmed = loop {
+            match &*g.borrow_and_update() {
+                Gate::Go(j) => break Some((**j).clone()),
+                Gate::Drop => break None,
+                Gate::Hold => {}
+            }
+            tokio::select! {
+                _ = cancel.cancelled() => break None,
+                r = g.changed() => if r.is_err() {
+                    break match &*g.borrow() { Gate::Go(j) => Some((**j).clone()), _ => None };
+                },
+                d = drx.recv(), if stream_open => match d {
+                    Some(d) => {
+                        if !first_token {
+                            first_token = true;
+                            stamps.record(&inner, id, Stage::FirstToken);
+                        }
+                        held.push(d);
+                    }
+                    None => stream_open = false,
+                },
+            }
+        };
+        let Some(j) = confirmed else { return }; // dropped: the guard stops the model; nothing was sent
+        job = Job { answer_id: id, ..j };
+        if !stream_open && held.is_empty() {
+            // The speculative stream ended with nothing to show: if it failed, start over now.
+            let r = (&mut run).await;
+            if let Ok(Err(e)) = &r
+                && !matches!(e, SscError::Cancelled)
+            {
+                log(format!("speculative answer {id} failed ({e}); restarting"));
+                spawn_job(&inner, job, cancel);
+                return;
+            }
+            early = Some(r);
+        }
+        stamps.commit(&inner, id);
+    }
 
     // 6. Push.
-    let mut first = true;
-    let mut detail_text = String::new();
-    while let Some(d) = drx.recv().await {
-        if first {
-            record(&inner, id, Stage::FirstToken);
-        }
-        if d.block == Block::Detail {
-            detail_text.push_str(&d.text);
-        }
-        for text in limits::split_chars(&d.text, 4096) {
-            send(&inner, sid, Message::AnswerDelta(AnswerDelta { answer_id: id, block: d.block, text })).await;
-        }
-        if first {
-            let t = record(&inner, id, Stage::FrameSent);
-            inner.first_frame.lock().unwrap().insert(id, t);
-            first = false;
+    let mut p = Push { started: false, first_sent: false, detail_text: String::new() };
+    for d in held {
+        push_delta(&inner, &job, sid, &mrx, d, &mut p).await;
+    }
+    if stream_open {
+        while let Some(d) = drx.recv().await {
+            if !first_token {
+                first_token = true;
+                record(&inner, id, Stage::FirstToken);
+            }
+            push_delta(&inner, &job, sid, &mrx, d, &mut p).await;
         }
     }
-    let (end, model) = match run.await {
+    let res = match early {
+        Some(r) => r,
+        None => run.await,
+    };
+    let fallback_model = || mrx.borrow().clone().unwrap_or_else(|| inner.parts.answers.primary_model().to_string());
+    let (mut end, model) = match res {
         Ok(Ok(outcome)) => {
             let parsed = match &job.expand {
                 // Expand all: the original cues with every expansion filled in.
-                Some(cues) => merge_detail(ParsedAnswer { cues: cues.clone(), ..Default::default() }, &detail_text),
+                Some(cues) => merge_detail(ParsedAnswer { cues: cues.clone(), ..Default::default() }, &p.detail_text),
                 None => outcome.parsed,
             };
             (parsed.into_answer_end(id, AnswerEndReason::Done), outcome.fast.model)
         }
-        Ok(Err(SscError::Cancelled)) => (end_with(id, AnswerEndReason::Cancelled), model),
+        Ok(Err(SscError::Cancelled)) => (end_with(id, AnswerEndReason::Cancelled), fallback_model()),
         Ok(Err(e)) => {
             log(format!("answer {id} failed: {e}"));
-            (error_end(id), model)
+            (error_end(id), fallback_model())
         }
         Err(e) => {
             log(format!("answer task {id} panicked: {e}"));
-            (error_end(id), model)
+            (error_end(id), fallback_model())
         }
     };
+    if job.shorter {
+        end.cues.truncate(SHORTER_CUES);
+        for c in &mut end.cues {
+            c.expand = None;
+        }
+    }
+    // The card exists on the phone before its end (no delta came: error or empty answer).
+    if end.reason != AnswerEndReason::Cancelled {
+        ensure_start(&inner, &job, sid, &mrx, &mut p).await;
+    }
     finish(&inner, &job, sid, end, model).await;
 }
 
@@ -628,6 +1046,20 @@ fn error_end(id: Uuid) -> AnswerEnd {
     end_with(id, AnswerEndReason::Error)
 }
 
+fn remember_answer(inner: &Inner, id: Uuid, meta: AnswerMeta) {
+    let seq = inner.answer_seq.fetch_add(1, Ordering::Relaxed);
+    insert_capped(&mut inner.answers.lock().unwrap(), id, seq, meta, MAX_REMEMBERED_ANSWERS);
+}
+
+/// Insert, then drop the lowest-`seq` entries above `cap` (L2).
+fn insert_capped<T>(m: &mut HashMap<Uuid, (u64, T)>, id: Uuid, seq: u64, v: T, cap: usize) {
+    m.insert(id, (seq, v));
+    while m.len() > cap {
+        let Some(oldest) = m.iter().min_by_key(|(_, (s, _))| *s).map(|(k, _)| *k) else { break };
+        m.remove(&oldest);
+    }
+}
+
 /// `answer.end`, then remember and store the answer.
 async fn finish(inner: &Arc<Inner>, job: &Job, sid: Option<Uuid>, end: AnswerEnd, model: String) {
     let end = limits::answer_end(end);
@@ -635,7 +1067,8 @@ async fn finish(inner: &Arc<Inner>, job: &Job, sid: Option<Uuid>, end: AnswerEnd
     if end.reason != AnswerEndReason::Done {
         return;
     }
-    inner.answers.lock().unwrap().insert(
+    remember_answer(
+        inner,
         job.answer_id,
         AnswerMeta {
             question: job.question.clone(),
@@ -654,22 +1087,64 @@ async fn finish(inner: &Arc<Inner>, job: &Job, sid: Option<Uuid>, end: AnswerEnd
             });
         }
     }
-    if let Some(session_id) = sid {
-        let rec = AnswerRecord {
-            id: job.answer_id,
-            session_id,
-            trigger: job.trigger,
-            format: job.format,
-            intent: job.intent,
-            model: if model.is_empty() { "unknown".into() } else { model },
-            question: job.question.clone(),
-            end,
-        };
-        let mem = inner.parts.memory.clone();
-        if let Err(e) = blocking(move || mem.record_answer(&rec)).await {
-            log(format!("answer store failed: {e}"));
-        }
+    let Some(session_id) = sid else { return };
+    let rec = AnswerRecord {
+        id: job.answer_id,
+        session_id,
+        trigger: job.trigger,
+        format: job.format,
+        intent: job.intent,
+        model: if model.is_empty() { "unknown".into() } else { model },
+        question: job.question.clone(),
+        end,
+    };
+    if job.tag
+        && let Some(gate) = inner.tag_gate.clone()
+    {
+        // M5: the record is stored once the background tag is in (or skipped), so the stored
+        // intent is the decision model's when it ran.
+        let inner = inner.clone();
+        let screen = inner.live.lock().unwrap().screen_diff.clone();
+        tokio::spawn(async move {
+            let mut rec = rec;
+            if let Some(d) = background_tag(&inner, &gate, &rec.question, &screen, rec.id).await {
+                rec.intent = d.intent.value;
+                if let Some((_, m)) = inner.answers.lock().unwrap().get_mut(&rec.id) {
+                    m.intent = d.intent.value;
+                }
+            }
+            store_answer(&inner, rec).await;
+        });
+        return;
     }
+    store_answer(inner, rec).await;
+}
+
+async fn store_answer(inner: &Inner, rec: AnswerRecord) {
+    let mem = inner.parts.memory.clone();
+    if let Err(e) = blocking(move || mem.record_answer(&rec)).await {
+        log(format!("answer store failed: {e}"));
+    }
+}
+
+/// The decision model's tags for an answer that fired without one (local/offline mode). Runs
+/// only after the answer ended, when no other answer is running and the gate says the decision
+/// model can run without Ollama swapping out the live answer model; else skipped (`None`).
+async fn background_tag(
+    inner: &Inner,
+    gate: &TagGate,
+    question: &str,
+    screen: &str,
+    id: Uuid,
+) -> Option<ssc_core::decision::Decision> {
+    if inner.active_answers.load(Ordering::SeqCst) > 0 || !gate().await {
+        return None;
+    }
+    let profiles = inner.live.lock().unwrap().engine.as_ref().map(|e| e.settings().profiles).unwrap_or_default();
+    let input = ssc_trigger::decision_input(question, screen, &profiles);
+    let d = tokio::time::timeout(inner.settings.tag_timeout, inner.parts.decision.decide(&input)).await.ok()?.ok()?;
+    record(inner, id, Stage::DecisionDone);
+    Some(d)
 }
 
 // ---------- phone commands ----------
@@ -689,7 +1164,7 @@ async fn command_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<ssc_core::protoc
 }
 
 fn meta(inner: &Inner, id: Uuid) -> Option<AnswerMeta> {
-    inner.answers.lock().unwrap().get(&id).cloned()
+    inner.answers.lock().unwrap().get(&id).map(|(_, m)| m.clone())
 }
 
 fn command_job(inner: &Inner, m: Option<&AnswerMeta>, question: String) -> Job {
@@ -714,6 +1189,7 @@ fn command_job(inner: &Inner, m: Option<&AnswerMeta>, question: String) -> Job {
         kind: PromptKind::for_format(format),
         shorter: false,
         expand: None,
+        tag: false,
     }
 }
 
@@ -796,7 +1272,7 @@ async fn handle_command(inner: Arc<Inner>, c: Command) {
     };
     if let Some(job) = job {
         let cancel = answer_cancel(&inner);
-        run_answer(inner, job, cancel).await;
+        run_answer(inner, job, cancel, None).await;
     }
 }
 
@@ -895,4 +1371,33 @@ async fn post_call(
         Err(e) => log(format!("follow-up draft failed: {e}")),
     }
     Ok(parsed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remembered_answers_are_capped_oldest_first() {
+        let mut m = HashMap::new();
+        let ids: Vec<Uuid> = (0..10).map(|_| Uuid::new_v4()).collect();
+        for (i, id) in ids.iter().enumerate() {
+            insert_capped(&mut m, *id, i as u64, i, 4);
+        }
+        assert_eq!(m.len(), 4);
+        assert!(ids[6..].iter().all(|id| m.contains_key(id)));
+        assert!(ids[..6].iter().all(|id| !m.contains_key(id)));
+    }
+
+    #[test]
+    fn unreported_first_frames_expire() {
+        let mut ff = HashMap::new();
+        let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
+        insert_first_frame(&mut ff, a, 1_000);
+        insert_first_frame(&mut ff, a, 2_000);
+        assert_eq!(ff[&a], 1_000, "the first frame wins");
+        insert_first_frame(&mut ff, b, 1_000 + FIRST_FRAME_TTL_MS);
+        assert!(!ff.contains_key(&a), "older than the TTL: dropped");
+        assert!(ff.contains_key(&b));
+    }
 }

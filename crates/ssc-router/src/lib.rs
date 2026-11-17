@@ -21,9 +21,11 @@ pub mod grammar;
 pub mod http;
 pub mod providers;
 pub mod speculative;
+pub mod warm;
 pub mod wire;
 
 pub use answer::{AnswerOutcome, AnswerRouter, Route, RoutedDelta};
 pub use decision::{Decided, DecisionRouter, DecisionSource, SystemOneDecision};
 pub use factory::{Models, RouterOptions, build};
 pub use grammar::{CueStream, ParsedAnswer, parse_answer};
+pub use warm::Warmer;

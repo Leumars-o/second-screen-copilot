@@ -4,7 +4,7 @@ mod common;
 
 use common::{Reply, serve};
 use ssc_core::SscError;
-use ssc_core::decision::DecisionInput;
+use ssc_core::decision::{DecisionInput, Tier};
 use ssc_core::mock::MockClock;
 use ssc_core::protocol::{Intent, Mode};
 use ssc_core::secrets::Secret;
@@ -284,4 +284,107 @@ async fn systemone_error_detail_is_reported() {
     assert!(matches!(e, SscError::Invalid(_)), "{e:?}");
     assert!(s.contains("api_usage_error") && s.contains("Unknown model: jev-1.14"), "{s}");
     assert!(!s.contains("ts-key"));
+}
+
+fn sse_frame(text: &str) -> Vec<u8> {
+    format!("data: {}\n\n", serde_json::json!({"choices": [{"delta": {"content": text}}]})).into_bytes()
+}
+
+/// M3: a provider that stalls after its first tokens ends the answer cleanly (no hang, no error):
+/// the cues that arrived are kept and the router reports success.
+#[tokio::test]
+async fn mid_stream_stall_ends_the_answer_cleanly() {
+    let (a, b, c) = (sse_frame("1. Requirements\n"), sse_frame("2. Design\n"), sse_frame("3. never\n"));
+    let parts: Vec<&[u8]> = vec![&a, &b, &c];
+    let reply =
+        Reply::chunked("text/event-stream", &parts, Duration::ZERO, Duration::ZERO).delay_last(Duration::from_secs(5));
+    let srv = serve(vec![reply]).await;
+    let m = OpenAiCompat::groq(&srv.url(), "m", Secret::new("k")).with_idle_timeout(Duration::from_millis(300));
+    let router =
+        AnswerRouter::new(Mode::Cloud, None, vec![Route::new(Arc::new(m)).first_token_ms(1000)], None).unwrap();
+    let (tx, mut rx) = mpsc::channel(256);
+    let (wtx, wrx) = tokio::sync::watch::channel(None);
+    let t = Instant::now();
+    let out = router
+        .answer_reporting(Tier::Fast, &prompt(), |_: &[String]| prompt(), tx, &Cancel::new(), Some(&wtx))
+        .await
+        .expect("a stall after the first token is not an error");
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    let texts: Vec<String> = out.parsed.cues.iter().map(|c| c.text.clone()).collect();
+    assert_eq!(texts, ["Requirements", "Design"]);
+    let mut got = String::new();
+    while let Ok(d) = rx.try_recv() {
+        got.push_str(&d.text);
+    }
+    assert!(got.contains("Design") && !got.contains("never"));
+    assert_eq!(wrx.borrow().as_deref(), Some("groq/m"));
+}
+
+/// M3: a stall before any text was forwarded fails over to the next route, and `answering`
+/// names the model that actually answered (L3).
+#[tokio::test]
+async fn stall_before_first_text_fails_over_and_reports_the_answering_model() {
+    // Headers + an SSE comment, then nothing: no text token. The first-token deadline is long,
+    // so the idle timeout is what trips.
+    let parts: Vec<&[u8]> = vec![b": ping\n\n", b"data: [DONE]\n\n"];
+    let stalled =
+        serve(vec![Reply::chunked("text/event-stream", &parts, Duration::ZERO, Duration::from_secs(5))]).await;
+    let good = serve(vec![Reply::sse(GEMINI)]).await;
+    let first = OpenAiCompat::groq(&stalled.url(), "m", Secret::new("k")).with_idle_timeout(Duration::from_millis(300));
+    let second = OpenAiCompat::gemini(&good.url(), "g", Secret::new("k"), GeminiTier::Paid, false).unwrap();
+    let router = AnswerRouter::new(
+        Mode::Cloud,
+        None,
+        vec![Route::new(Arc::new(first)).first_token_ms(10_000), Route::new(Arc::new(second))],
+        None,
+    )
+    .unwrap();
+    let (tx, _rx) = mpsc::channel(256);
+    let (wtx, wrx) = tokio::sync::watch::channel(None);
+    let t = Instant::now();
+    let out = router
+        .answer_reporting(Tier::Fast, &prompt(), |_: &[String]| prompt(), tx, &Cancel::new(), Some(&wtx))
+        .await
+        .unwrap();
+    assert!(t.elapsed() < Duration::from_secs(2), "{:?}", t.elapsed());
+    assert_eq!(out.fast.model, "gemini/g");
+    assert_eq!(wrx.borrow().as_deref(), Some("gemini/g"));
+}
+
+/// H2 budget rule: speculation stops well before the Groq budget is tight.
+#[tokio::test]
+async fn speculation_respects_the_budget() {
+    let clock = Arc::new(MockClock::new(0));
+    let budget = Arc::new(BudgetTracker::new(Default::default(), clock));
+    let groq = Arc::new(OpenAiCompat::groq("http://127.0.0.1:9", "m", Secret::new("k")));
+    let router = AnswerRouter::new(Mode::Cloud, None, vec![Route::new(groq).budget(budget.clone())], None).unwrap();
+    assert!(router.speculation_allowed());
+    while budget.below(ssc_router::answer::SPECULATION_BUDGET_FRACTION) {
+        assert!(budget.try_reserve(1));
+    }
+    assert!(!router.speculation_allowed());
+    assert!(budget.try_reserve(1), "the confirmed answer still has budget left");
+}
+
+/// M2: the factory's warmer opens the Groq and Gemini connections with `GET /models` (no
+/// completion, nothing reserved from the budget).
+#[tokio::test]
+async fn warmer_opens_cloud_connections() {
+    use ssc_core::secrets::{MemorySecretStore, SecretKey, SecretStore};
+    let groq = serve(vec![Reply::ok("application/json", b"{}")]).await;
+    let gem = serve(vec![Reply::ok("application/json", b"{}")]).await;
+    let s = MemorySecretStore::default();
+    s.set(&SecretKey::Groq, &Secret::new("gk")).unwrap();
+    s.set(&SecretKey::Gemini, &Secret::new("mk")).unwrap();
+    let opts =
+        ssc_router::RouterOptions { groq_base_url: groq.url(), gemini_base_url: gem.url(), ..Default::default() };
+    let m = ssc_router::build(&ssc_core::config::Config::default(), &s, Arc::new(MockClock::new(0)), &opts).unwrap();
+    m.warm.warm(None).await;
+    for (srv, key) in [(&groq, "Bearer gk"), (&gem, "Bearer mk")] {
+        let r = srv.requests();
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].method.as_str(), r[0].path.as_str()), ("GET", "/models"));
+        assert_eq!(r[0].header("authorization"), Some(key));
+    }
+    assert_eq!(m.groq_budget.unwrap().usage().requests_min, 0, "warm-up spends no budget");
 }

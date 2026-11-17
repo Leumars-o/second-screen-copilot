@@ -23,8 +23,12 @@ use ssc_core::types::{Prompt, StreamStats, Token};
 use ssc_core::{Result, SscError};
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 use tokio::time::Instant;
+
+/// Speculative answers start only while the first fast route's budget is below this fraction of
+/// every cap (see [`AnswerRouter::speculation_allowed`]).
+pub const SPECULATION_BUDGET_FRACTION: f64 = 0.6;
 
 /// One entry of a failover chain.
 #[derive(Clone)]
@@ -108,9 +112,25 @@ impl AnswerRouter {
         self.strong.is_some()
     }
 
+    /// True when a speculative answer may start (H2): the first fast route has no budget, or its
+    /// budget is below [`SPECULATION_BUDGET_FRACTION`] of every cap and not cooling down. A
+    /// speculation that the decision cancels still costs a provider request, so it is skipped
+    /// well before the budget gets tight; the confirmed answer then starts after the decision.
+    pub fn speculation_allowed(&self) -> bool {
+        match self.fast.first().and_then(|r| r.budget.as_ref()) {
+            Some(b) => b.below(SPECULATION_BUDGET_FRACTION),
+            None => true,
+        }
+    }
+
+    /// The fast-chain route ids, in order (the first one is the model expected to answer).
+    pub fn primary_model(&self) -> &str {
+        self.fast.first().map(|r| r.model.id()).unwrap_or("unknown")
+    }
+
     /// Stream raw tokens from the fast chain (no grammar handling).
     pub async fn stream(&self, prompt: &Prompt, tx: mpsc::Sender<Token>, cancel: &Cancel) -> Result<StreamStats> {
-        self.run_chain(&self.fast, prompt, tx, cancel, &Cancel::new()).await
+        self.run_chain(&self.fast, prompt, tx, cancel, &Cancel::new(), None).await
     }
 
     /// Full answer: classified deltas to `tx`, parsed card in the result.
@@ -130,11 +150,29 @@ impl AnswerRouter {
     where
         F: FnOnce(&[String]) -> Prompt + Send,
     {
+        self.answer_reporting(tier, prompt, detail_prompt, tx, cancel, None).await
+    }
+
+    /// [`Self::answer`], and `answering` is set to the id of the fast-chain model that produced
+    /// the first token, before that token is forwarded (L3: `answer.start.model` names the model
+    /// that actually answers, after any failover).
+    pub async fn answer_reporting<F>(
+        &self,
+        tier: Tier,
+        prompt: &Prompt,
+        detail_prompt: F,
+        tx: mpsc::Sender<RoutedDelta>,
+        cancel: &Cancel,
+        answering: Option<&watch::Sender<Option<String>>>,
+    ) -> Result<AnswerOutcome>
+    where
+        F: FnOnce(&[String]) -> Prompt + Send,
+    {
         let strong = (tier == Tier::Strong).then_some(()).and(self.strong.as_ref());
         let stop = Cancel::new();
         let (ftx, mut frx) = mpsc::channel::<Token>(64);
         let mut cls = CueStream::new(Block::Cue);
-        let fast = self.run_chain(&self.fast, prompt, ftx, cancel, &stop);
+        let fast = self.run_chain(&self.fast, prompt, ftx, cancel, &stop, answering);
         tokio::pin!(fast);
         let mut fast_res = None;
         loop {
@@ -195,7 +233,7 @@ impl AnswerRouter {
         let (stx, mut srx) = mpsc::channel::<Token>(64);
         let mut cls = CueStream::new(Block::Detail);
         let never = Cancel::new();
-        let run = self.run_chain(routes, prompt, stx, cancel, &never);
+        let run = self.run_chain(routes, prompt, stx, cancel, &never, None);
         tokio::pin!(run);
         let mut res = None;
         loop {
@@ -229,6 +267,7 @@ impl AnswerRouter {
         tx: mpsc::Sender<Token>,
         cancel: &Cancel,
         stop: &Cancel,
+        answering: Option<&watch::Sender<Option<String>>>,
     ) -> Result<StreamStats> {
         let mut last_err: Option<SscError> = None;
         for route in routes {
@@ -308,6 +347,9 @@ impl AnswerRouter {
             };
 
             let first_ms = start.elapsed().as_millis() as u64;
+            if let Some(w) = answering {
+                w.send_replace(Some(id.clone()));
+            }
             let mut n = 1u32;
             let partial = |n: u32| StreamStats {
                 model: id.clone(),
@@ -350,8 +392,12 @@ impl AnswerRouter {
                 }
                 r = &mut handle => r.unwrap_or_else(|_| Err(SscError::Unavailable("answer task failed".into()))),
             };
-            // An error after the first token can't fail over: text is already on the phone.
-            return res;
+            // An error after the first token can't fail over: text is already on the phone. A
+            // mid-stream stall (idle timeout, M3) ends the answer cleanly with what arrived.
+            return match res {
+                Err(SscError::Timeout(_)) => Ok(partial(n)),
+                r => r,
+            };
         }
         Err(last_err.unwrap_or_else(|| SscError::Unavailable("no answer model available".into())))
     }

@@ -34,9 +34,12 @@ and p95 ≤ 2.5 s. The offline target (about 2–2.5 s) is reported but not enfo
 - Analyse a real run's log (works today):
   `cargo run -p ssc-bench -- latency --jsonl ~/.ssc/timing/2026-11-20.jsonl --mode cloud --enforce`
   exits non-zero when the targets are missed.
-- `--live` replays the fixture calls through the real pipeline. The single integration point
-  is `latency::real_pipeline()` in `src/latency.rs`, which is a marked stub until W2-INTEGRATE
-  exposes a replay entry point. Until then `--live` stops with an explanation. Use `--jsonl` instead.
+- `--live` replays the fixture calls through the real pipeline (`ssc_pipeline::replay`): your
+  config + keychain models and memory, and the real `PcTransport` on loopback with a paired Rust
+  phone client, so batching, encryption and the transport's `frame_sent` are in the numbers.
+  STT is a stand-in (final transcript 250 ms after the end of speech; `bench stt` measures real
+  STT) and the loopback RTT is ≈ 0, so add the phone's Wi-Fi RTT/2 for a real-phone figure.
+  The live path's daily log is `~/.ssc/timing/<UTC date>.jsonl` (one file per day).
 
 ## ttft
 

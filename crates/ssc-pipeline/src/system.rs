@@ -5,22 +5,25 @@
 //! and only the PC identity / paired phone (device keys, not provider keys) come from the keychain.
 
 use crate::RoutedDecisions;
-use crate::pipeline::{Hook, Parts, Pipeline, Settings};
+use crate::pipeline::{Extras, FrameSentEvent, Hook, Parts, Pipeline, Settings, TagGate};
 use crate::stt_select::{SttChoice, choose_stt};
 use crate::transport::start_transport;
 use ssc_core::config::{Config, data_dir};
 use ssc_core::protocol::Mode;
 use ssc_core::secrets::{SecretKey, SecretStore};
-use ssc_core::timing::{Timing, daily_file};
+use ssc_core::timing::Timing;
 use ssc_core::traits::{AudioSource, Clock, Embedder, ScreenSource, SttEngine, SystemClock};
 use ssc_core::{Result, SscError};
 use ssc_memory::SqliteMemory;
 use ssc_router::budget::BudgetTracker;
+use ssc_router::factory::LocalModels;
 use ssc_router::providers::Ollama;
+use ssc_router::providers::ollama::{has_model, loaded_models};
 use ssc_router::{DecisionRouter, RouterOptions};
 use ssc_transport::{LanTlsManager, PcTransport};
 use std::path::PathBuf;
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// Timing ring buffer size (debug panel).
 pub const TIMING_RING: usize = 4096;
@@ -37,6 +40,8 @@ pub struct System {
     pub stt: SttChoice,
     /// `None` when the platform reader could not be created.
     pub screen_available: bool,
+    /// Background tasks owned by the system (timing log); cancel on shutdown.
+    pub background: CancellationToken,
 }
 
 /// Progress sink for model downloads (shared by the embedder and whisper downloaders).
@@ -107,15 +112,31 @@ fn unload_live_hook(cfg: &Config) -> Hook {
     })
 }
 
+/// M5 gate: the background tagger may run the local decision model only when Ollama already
+/// holds both the live answer model and the decision model, so tagging never makes Ollama swap
+/// the answer model out (measured: Tev1 4B p50 3.2 s under swapping vs ~0.75 s idle, and the
+/// next answer then pays a cold load). Unreachable Ollama → no tag.
+pub fn tag_gate(m: LocalModels) -> TagGate {
+    let client = ssc_router::http::client();
+    Arc::new(move || {
+        let (client, m) = (client.clone(), m.clone());
+        Box::pin(async move {
+            match loaded_models(&client, &m.ollama_url).await {
+                Ok(have) => has_model(&have, &m.answer_model) && has_model(&have, &m.decision_model),
+                Err(_) => false,
+            }
+        })
+    })
+}
+
 /// Build every real component for `cfg.mode` and start the pipeline (no session yet).
 pub async fn build(cfg: Config, secrets: Arc<dyn SecretStore>, progress: Progress<'_>) -> Result<System> {
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let dir = data_dir();
-    let timing = Timing::new(TIMING_RING);
-    let timing = Arc::new(timing.with_jsonl(&daily_file(&dir.join("timing"), clock.now_ms())).unwrap_or_else(|e| {
-        eprintln!("[ssc-pipeline] timing JSONL disabled: {e}");
-        Timing::new(TIMING_RING)
-    }));
+    // Ring only; `timing_log` writes the JSONL, one file per UTC day (L7).
+    let timing = Arc::new(Timing::new(TIMING_RING));
+    let background = CancellationToken::new();
+    crate::timing_log::spawn(timing.clone(), dir.join("timing"), background.clone());
 
     let memory = {
         let path = dir.join("memory.sqlite");
@@ -169,7 +190,20 @@ pub async fn build(cfg: Config, secrets: Arc<dyn SecretStore>, progress: Progres
         clock,
         timing,
     };
-    let pipeline = Pipeline::new(parts, Settings::new(cfg));
+    // frame_sent from the transport: the first delta actually written to the socket.
+    let frame_sent = transport.take_frame_sent().map(|mut rx| {
+        let (tx, out) = tokio::sync::mpsc::channel(64);
+        tokio::spawn(async move {
+            while let Some(f) = rx.recv().await {
+                if tx.send(FrameSentEvent { answer_id: f.answer_id, t_ms: f.t_ms }).await.is_err() {
+                    break;
+                }
+            }
+        });
+        out
+    });
+    let extras = Extras { warm: Some(models.warm), tag_gate: Some(tag_gate(models.tev1)), frame_sent };
+    let pipeline = Pipeline::with_extras(parts, Settings::new(cfg), extras);
     Ok(System {
         pipeline,
         transport,
@@ -179,5 +213,6 @@ pub async fn build(cfg: Config, secrets: Arc<dyn SecretStore>, progress: Progres
         groq_budget: models.groq_budget,
         stt: stt_choice,
         screen_available: screen.is_some(),
+        background,
     })
 }

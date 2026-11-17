@@ -167,9 +167,11 @@ impl PipelineDriver for MockPipeline {
 }
 
 /// The real `ssc-pipeline` (W2-INTEGRATE): `~/.ssc/config.toml` + keychain keys, real decision and
-/// answer models, the user's memory store. Each fixture question is played as a final "them"
-/// utterance (`ssc_pipeline::replay`); STT and the phone are stand-ins, so `speech_end →
-/// transcript_final` is ~0 and `phone_rendered` uses the fixture's `phone_delta_ms`.
+/// answer models, the user's memory store, and the real `PcTransport` on loopback with a paired
+/// Rust phone client (`ssc_pipeline::replay`, M6), so batching, encryption and the transport's
+/// `frame_sent` are measured. STT is a stand-in (partial, then the final transcript
+/// `STT_FINALIZE_MS` after the end of speech); `phone_rendered` uses the fixture's
+/// `phone_delta_ms` and the loopback RTT (≈ 0: add the phone's Wi-Fi RTT/2 to read a real phone).
 pub fn real_pipeline() -> Result<Arc<dyn PipelineDriver>> {
     Ok(Arc::new(RealPipeline))
 }
@@ -179,7 +181,7 @@ struct RealPipeline;
 #[async_trait]
 impl PipelineDriver for RealPipeline {
     fn name(&self) -> &str {
-        "real ssc-pipeline (config + keychain models; scripted transcript)"
+        "real ssc-pipeline (config + keychain models, loopback PcTransport + phone; scripted transcript)"
     }
 
     async fn replay(&self, call: &FixtureCall, timing: &Timing) -> Result<()> {

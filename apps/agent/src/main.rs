@@ -6,6 +6,7 @@ mod app;
 mod cli;
 mod permissions;
 mod settings;
+mod slot;
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();

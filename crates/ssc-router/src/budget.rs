@@ -102,6 +102,23 @@ impl BudgetTracker {
         ok
     }
 
+    /// True when usage is below `fraction` of every configured limit and no 429 cool-down is
+    /// running. Used to decide whether optional (speculative) calls may spend budget.
+    pub fn below(&self, fraction: f64) -> bool {
+        let now = self.clock.now_ms();
+        let inner = self.inner.lock().unwrap();
+        if now < inner.cooldown_until {
+            return false;
+        }
+        let u = Self::usage_at(&inner, now);
+        let l = &self.limits;
+        let under = |used: u32, limit: u32| limit == 0 || f64::from(used) < fraction * f64::from(limit);
+        under(u.requests_min, l.requests_per_min)
+            && under(u.requests_day, l.requests_per_day)
+            && under(u.tokens_min, l.tokens_per_min)
+            && under(u.tokens_day, l.tokens_per_day)
+    }
+
     /// The provider said 429: stop using it until `retry_after` (or the default cool-down) passes.
     pub fn mark_rate_limited(&self, retry_after_ms: Option<u64>) {
         let now = self.clock.now_ms();
@@ -171,6 +188,25 @@ mod tests {
         b.mark_rate_limited(None);
         c.advance(DEFAULT_COOLDOWN_MS - 1);
         assert!(!b.try_reserve(1));
+    }
+
+    #[test]
+    fn below_fraction_for_optional_calls() {
+        let (b, c) = tracker(GroqBudget::default()); // 30 rpm, 8000 tpm
+        assert!(b.below(0.6));
+        for _ in 0..17 {
+            assert!(b.try_reserve(10));
+        }
+        assert!(b.below(0.6), "17 of 30 requests");
+        assert!(b.try_reserve(10));
+        assert!(!b.below(0.6), "18 of 30 = 60%");
+        c.advance(MINUTE_MS);
+        assert!(b.below(0.6));
+        assert!(b.try_reserve(4_800));
+        assert!(!b.below(0.6), "tokens at 60%");
+        c.advance(MINUTE_MS);
+        b.mark_rate_limited(Some(1000));
+        assert!(!b.below(0.6), "cooling down");
     }
 
     #[test]

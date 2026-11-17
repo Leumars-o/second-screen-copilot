@@ -301,6 +301,8 @@ pub struct Budget {
     pub question: usize,
     pub answer: usize,
     pub session: usize,
+    /// Cards for known contacts/accounts mentioned in the call (placed with the documents).
+    pub known: usize,
     /// Hard cap on the whole dynamic part, template text included. `None` = no cap.
     pub dynamic_cap: Option<usize>,
 }
@@ -319,6 +321,7 @@ impl Budget {
             question: 200,
             answer: 300,
             session: 6000,
+            known: 150,
             dynamic_cap: None,
         }
     }
@@ -337,6 +340,7 @@ impl Budget {
             question: 40,
             answer: 80,
             session: 150,
+            known: 40,
             dynamic_cap: Some(300),
         }
     }
@@ -363,6 +367,9 @@ pub struct ContextInput {
     pub session: String,
     /// Reference time for the transcript window, unix ms.
     pub now_ms: u64,
+    /// Saved contacts and accounts; the ones mentioned in the question, screen or recent
+    /// transcript get a compact card next to the documents (M7).
+    pub known: Vec<Known>,
 }
 
 /// The rendered prompt plus what went into it (for `source_doc`, `not_in_docs` and the debug panel).
@@ -487,6 +494,141 @@ fn docs_text(chunks: &[Chunk], budget: usize, max_chunks: usize) -> (String, Vec
     (text, used_chunks)
 }
 
+// ---------- known contacts / accounts (M7) ----------
+
+/// Whether a [`Known`] entry is a person or a company.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KnownKind {
+    Contact,
+    Account,
+}
+
+/// A saved contact or account (from the user's memory; contacts are only saved after the user
+/// confirmed them). Spec memory table: used "when a known name or company appears on screen or
+/// in audio".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Known {
+    pub kind: KnownKind,
+    pub name: String,
+    pub notes: String,
+}
+
+/// At most this many cards per prompt.
+pub const MAX_KNOWN_CARDS: usize = 3;
+
+fn is_word_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '\'' || c == '-'
+}
+
+/// Byte offset of the first whole-word occurrence of `needle` in `hay`, case-insensitive. When
+/// `capitalised` is set the occurrence must start with an uppercase letter (a name, not a word).
+fn find_word(hay: &str, needle: &str, capitalised: bool) -> Option<usize> {
+    let (h, n) = (hay.to_lowercase(), needle.to_lowercase());
+    if n.is_empty() || h.len() != hay.len() {
+        // Lowercasing changed byte lengths (rare scripts): fall back to an exact-case search.
+        return find_word_exact(hay, needle);
+    }
+    let mut from = 0;
+    while let Some(i) = h[from..].find(&n) {
+        let s = from + i;
+        let e = s + n.len();
+        let before = h[..s].chars().next_back().is_none_or(|c| !is_word_char(c));
+        let after = h[e..].chars().next().is_none_or(|c| !is_word_char(c));
+        let cap = !capitalised || hay[s..].chars().next().is_some_and(char::is_uppercase);
+        if before && after && cap {
+            return Some(s);
+        }
+        from = s + n.len().max(1);
+        while !h.is_char_boundary(from) {
+            from += 1;
+        }
+    }
+    None
+}
+
+fn find_word_exact(hay: &str, needle: &str) -> Option<usize> {
+    hay.match_indices(needle).map(|(i, _)| i).find(|&s| {
+        let e = s + needle.len();
+        hay[..s].chars().next_back().is_none_or(|c| !is_word_char(c))
+            && hay[e..].chars().next().is_none_or(|c| !is_word_char(c))
+    })
+}
+
+/// The known contacts/accounts mentioned in `text`, in order of first mention, at most
+/// [`MAX_KNOWN_CARDS`]. Deterministic rules:
+/// - names shorter than 3 characters never match;
+/// - the full name matches as a whole word, any case;
+/// - for a contact, one part of the name (≥ 3 chars, e.g. "Dana" for "Dana Obi") also matches,
+///   but only capitalised in the text and only if no other known contact shares that part.
+pub fn mentioned<'a>(known: &'a [Known], text: &str) -> Vec<&'a Known> {
+    let parts_of = |k: &Known| -> Vec<String> {
+        k.name.split_whitespace().filter(|p| p.chars().count() >= 3).map(|p| p.to_lowercase()).collect()
+    };
+    let mut hits: Vec<(usize, &Known)> = Vec::new();
+    for k in known {
+        let name = k.name.trim();
+        if name.chars().count() < 3 {
+            continue;
+        }
+        let mut at = find_word(text, name, false);
+        if at.is_none() && k.kind == KnownKind::Contact {
+            for p in parts_of(k) {
+                let shared = known
+                    .iter()
+                    .filter(|o| o.kind == KnownKind::Contact && !std::ptr::eq(*o, k))
+                    .any(|o| parts_of(o).contains(&p));
+                if shared {
+                    continue;
+                }
+                if let Some(i) = find_word(text, &p, true) {
+                    at = Some(at.map_or(i, |a: usize| a.min(i)));
+                }
+            }
+        }
+        if let Some(i) = at {
+            hits.push((i, k));
+        }
+    }
+    hits.sort_by_key(|(i, _)| *i);
+    hits.into_iter().map(|(_, k)| k).take(MAX_KNOWN_CARDS).collect()
+}
+
+/// Compact cards for the known entries mentioned in the question, screen diff or recent
+/// transcript, within `budget` tokens. Empty when nothing matched.
+fn known_text(input: &ContextInput, budget: usize) -> String {
+    if input.known.is_empty() || budget == 0 {
+        return String::new();
+    }
+    // Question first (it's what's being answered), then the screen, then the recent transcript.
+    let recent: Vec<&str> = input.transcript.iter().rev().take(6).map(|s| s.text.as_str()).collect();
+    let text = format!("{}\n{}\n{}", input.question, input.screen, recent.join("\n"));
+    let hits = mentioned(&input.known, &text);
+    if hits.is_empty() {
+        return String::new();
+    }
+    let header = "Known people and companies (the user's saved notes):";
+    let mut used = count_tokens(header);
+    let mut lines = vec![header.to_string()];
+    for k in hits {
+        let kind = match k.kind {
+            KnownKind::Contact => "contact",
+            KnownKind::Account => "company",
+        };
+        let label = format!("- {} ({kind}): ", k.name.trim());
+        let room = budget.saturating_sub(used + count_tokens(&label) + 1);
+        if room < 4 {
+            break;
+        }
+        let notes = k.notes.split_whitespace().collect::<Vec<_>>().join(" ");
+        let notes = if notes.is_empty() { "no notes".to_string() } else { truncate_head(&notes, room) };
+        // Notes can quote call content (post-call suggestions): keep them from closing a wrapper.
+        let line = format!("{label}{}", neutralize_untrusted(&notes));
+        used += count_tokens(&line) + 1;
+        lines.push(line);
+    }
+    if lines.len() == 1 { String::new() } else { lines.join("\n") }
+}
+
 // ---------- builder ----------
 
 /// Renders `kind` with `input` under `budget`.
@@ -518,7 +660,14 @@ pub fn assemble(kind: PromptKind, input: &ContextInput, budget: &Budget) -> Asse
         } else {
             (String::new(), 0, 0)
         };
-        v.docs = docs;
+        // Known contacts/accounts ride in the documents slot (the prompt templates are frozen and
+        // have no slot of their own; CR-17 asks for one). They come first: short and specific.
+        let known = if uses(Slot::Docs) { known_text(input, b.known) } else { String::new() };
+        v.docs = match (known.is_empty(), chunks_used.is_empty()) {
+            (true, _) => docs,
+            (false, true) => known,
+            (false, false) => format!("{known}\n\n{docs}"),
+        };
         v.transcript = transcript;
         // Screen diff is newest first: keep the head. Question: keep the end (the actual ask).
         v.screen = if uses(Slot::Screen) { truncate_head(input.screen.trim(), b.screen) } else { String::new() };
@@ -550,7 +699,15 @@ pub fn assemble(kind: PromptKind, input: &ContextInput, budget: &Budget) -> Asse
         // Take the excess from the least important part that still has room:
         // screen → docs (drops lowest-ranked) → older transcript → question → answer/session.
         let mut excess = dynamic_tokens - cap;
-        for part in [&mut b.screen, &mut b.docs, &mut b.transcript, &mut b.question, &mut b.answer, &mut b.session] {
+        for part in [
+            &mut b.screen,
+            &mut b.known,
+            &mut b.docs,
+            &mut b.transcript,
+            &mut b.question,
+            &mut b.answer,
+            &mut b.session,
+        ] {
             let take = excess.min(*part);
             *part -= take;
             excess -= take;

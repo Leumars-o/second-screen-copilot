@@ -15,7 +15,7 @@
 //! per-request `options` is material for first-token latency, so the native path stays.
 
 use super::{is_loopback_url, model_id};
-use crate::http::{Step, StreamParser, drive};
+use crate::http::{Step, StreamParser, drive_with_idle};
 use crate::wire::NdjsonDecoder;
 use async_trait::async_trait;
 use serde_json::{Value, json};
@@ -38,6 +38,36 @@ pub struct Ollama {
     /// use their lowest level and stream it in `message.thinking`, which is never shown.
     /// `None` leaves the model default.
     think: Option<bool>,
+    idle: std::time::Duration,
+}
+
+/// Names of the models Ollama has in memory right now (`GET /api/ps`).
+pub async fn loaded_models(client: &reqwest::Client, base_url: &str) -> Result<Vec<String>> {
+    let r = client
+        .get(format!("{}/api/ps", base_url.trim_end_matches('/')))
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+        .map_err(|e| crate::http::map_reqwest(e, 0))?;
+    if !r.status().is_success() {
+        return Err(SscError::Unavailable(format!("http {}", r.status())));
+    }
+    let v: Value = r.json().await.map_err(|_| SscError::Unavailable("bad /api/ps body".into()))?;
+    Ok(parse_ps(&v))
+}
+
+fn parse_ps(v: &Value) -> Vec<String> {
+    v["models"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|m| m["name"].as_str().or_else(|| m["model"].as_str()).map(String::from))
+        .collect()
+}
+
+/// `have` contains `want` (an untagged name matches `:latest`).
+pub fn has_model(have: &[String], want: &str) -> bool {
+    have.iter().any(|h| h == want || h.strip_suffix(":latest") == Some(want) || want.strip_suffix(":latest") == Some(h))
 }
 
 impl Ollama {
@@ -50,7 +80,27 @@ impl Ollama {
             client: crate::http::client(),
             local: is_loopback_url(base_url),
             think: Some(false),
+            idle: crate::http::DEFAULT_IDLE_TIMEOUT,
         }
+    }
+
+    pub fn with_idle_timeout(mut self, idle: std::time::Duration) -> Self {
+        self.idle = idle;
+        self
+    }
+
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// The Ollama model name (without the `ollama/` prefix).
+    pub fn model(&self) -> &str {
+        &self.model
+    }
+
+    /// Models Ollama currently holds in memory.
+    pub async fn loaded(&self) -> Result<Vec<String>> {
+        loaded_models(&self.client, &self.base_url).await
     }
 
     pub fn with_keep_alive(mut self, keep_alive: &str) -> Self {
@@ -121,7 +171,7 @@ impl AnswerModel for Ollama {
     }
     async fn stream(&self, prompt: &Prompt, tx: mpsc::Sender<Token>, cancel: Cancel) -> Result<StreamStats> {
         let req = self.client.post(format!("{}/api/chat", self.base_url)).json(&self.body(prompt));
-        drive(&self.id, req, OllamaNdjson::default(), &tx, &cancel).await
+        drive_with_idle(&self.id, req, OllamaNdjson::default(), &tx, &cancel, self.idle).await
     }
 }
 
@@ -192,6 +242,16 @@ mod tests {
         assert!(s.done);
         assert_eq!(s.texts.concat(), "1. Requirements\n2. Design\n3. Build\n---\n1: Ask about users\n");
         assert_eq!(s.tokens_out, Some(15));
+    }
+
+    #[test]
+    fn ps_names() {
+        let v = json!({"models": [{"name": "gemma4:e2b", "model": "gemma4:e2b"}, {"model": "tev1:4b"}]});
+        let have = parse_ps(&v);
+        assert_eq!(have, vec!["gemma4:e2b", "tev1:4b"]);
+        assert!(has_model(&have, "tev1:4b") && !has_model(&have, "qwen3:8b"));
+        assert!(has_model(&["m:latest".into()], "m") && has_model(&["m".into()], "m:latest"));
+        assert!(parse_ps(&json!({})).is_empty());
     }
 
     #[test]

@@ -11,6 +11,7 @@ use ssc_core::traits::Clock;
 use ssc_core::{Result, SscError};
 use ssc_crypto::{Identity, PairedDevice};
 use ssc_transport::{LanTlsManager, LanTlsOptions, LanTlsStatus, PcTransport, TransportConfig};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -43,8 +44,33 @@ pub fn load_device(secrets: &dyn SecretStore, dir: &Path) -> Result<Option<Paire
     }
 }
 
+/// Devices revoked in this process: (data dir, device id) → revoked at (unix ms).
+///
+/// L5: the transport's device-update task (seq counters) and the shutdown snapshot can write a
+/// device record *after* `unpair` deleted it, resurrecting the pairing. Any record of a revoked
+/// device that was created before the revocation is dropped; a new pairing (created later) is
+/// stored normally.
+static REVOKED: std::sync::LazyLock<std::sync::Mutex<HashMap<(PathBuf, String), u64>>> =
+    std::sync::LazyLock::new(Default::default);
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn is_revoked(dir: &Path, dev: &PairedDevice) -> bool {
+    REVOKED
+        .lock()
+        .unwrap()
+        .get(&(dir.to_path_buf(), dev.device_id.clone()))
+        .is_some_and(|revoked_at| dev.created_at <= *revoked_at)
+}
+
 /// Write a device record (new pairing or counter update). A different device replaces the old one.
+/// Updates for a revoked pairing are dropped (L5).
 pub fn store_device(secrets: &dyn SecretStore, dir: &Path, dev: &PairedDevice) -> Result<()> {
+    if is_revoked(dir, dev) {
+        return Ok(());
+    }
     if let Ok(old) = std::fs::read_to_string(device_file(dir)) {
         let old = old.trim();
         if !old.is_empty() && old != dev.device_id {
@@ -62,6 +88,7 @@ pub fn revoke_device(secrets: &dyn SecretStore, dir: &Path) -> Result<()> {
     if let Ok(id) = std::fs::read_to_string(device_file(dir)) {
         let id = id.trim();
         if !id.is_empty() {
+            REVOKED.lock().unwrap().insert((dir.to_path_buf(), id.to_string()), now_ms());
             secrets.delete(&SecretKey::PairedDevice(id.to_string()))?;
         }
     }
@@ -177,6 +204,28 @@ mod tests {
         assert!(load_device(&s, &dir).unwrap().is_none());
         assert!(s.get(&SecretKey::PairedDevice(d2.device_id)).unwrap().is_none());
         revoke_device(&s, &dir).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// L5: a counter update that lands after `unpair` must not resurrect the pairing; a new
+    /// pairing of the same phone afterwards is stored.
+    #[test]
+    fn late_update_after_revoke_is_dropped() {
+        let dir = std::env::temp_dir().join(format!("ssc-pipe-rev-{}", uuid::Uuid::new_v4()));
+        let s = MemorySecretStore::default();
+        let mut d = device();
+        d.created_at = now_ms() - 1_000;
+        store_device(&s, &dir, &d).unwrap();
+        revoke_device(&s, &dir).unwrap();
+        let mut late = d.clone();
+        late.counters.next_send += 100; // the transport's queued seq update
+        store_device(&s, &dir, &late).unwrap();
+        assert!(load_device(&s, &dir).unwrap().is_none(), "revoked device came back");
+        assert!(s.get(&SecretKey::PairedDevice(d.device_id.clone())).unwrap().is_none());
+        let mut again = d.clone();
+        again.created_at = now_ms() + 1;
+        store_device(&s, &dir, &again).unwrap();
+        assert_eq!(load_device(&s, &dir).unwrap().unwrap().created_at, again.created_at);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

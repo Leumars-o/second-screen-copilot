@@ -33,3 +33,6 @@ tauri-plugin-global-shortcut = "2"
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util", "macros", "rt"] }

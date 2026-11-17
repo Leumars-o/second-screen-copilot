@@ -7,6 +7,7 @@ use crate::decision::{DecisionRouter, DecisionRouterConfig, DecisionSlot, HttpPr
 use crate::providers::anthropic::ANTHROPIC_BASE_URL;
 use crate::providers::openai::{GEMINI_BASE_URL, GROQ_BASE_URL, OPENAI_BASE_URL};
 use crate::providers::{Anthropic, Ollama, OpenAiCompat, is_loopback_url};
+use crate::warm::Warmer;
 use ssc_core::config::Config;
 use ssc_core::protocol::Mode;
 use ssc_core::secrets::{Secret, SecretKey, SecretStore};
@@ -49,7 +50,23 @@ pub struct Models {
     pub postcall: Arc<dyn AnswerModel>,
     /// The Groq budget, for the debug panel.
     pub groq_budget: Option<Arc<BudgetTracker>>,
+    /// Session-start / keep-alive warm-up of the answer providers (M2).
+    pub warm: Warmer,
+    /// The local decision model (Tev1) and the Ollama it runs on, for the background tagger's
+    /// "no model swap" check (M5).
+    pub tev1: LocalModels,
 }
+
+/// Names the pipeline needs to check what Ollama holds in memory.
+#[derive(Debug, Clone, Default)]
+pub struct LocalModels {
+    pub ollama_url: String,
+    pub answer_model: String,
+    pub decision_model: String,
+}
+
+/// Gemini (paid tier) fails over to the local model when no token arrives in this long (M3).
+pub const GEMINI_FIRST_TOKEN_MS: u64 = 1500;
 
 fn key(secrets: &dyn SecretStore, k: SecretKey) -> Result<Option<Secret>> {
     Ok(secrets.get(&k)?.filter(|s| !s.expose().trim().is_empty()))
@@ -64,6 +81,11 @@ pub fn build(cfg: &Config, secrets: &dyn SecretStore, clock: Arc<dyn Clock>, opt
     let tev1 = DecisionSlot {
         model: Arc::new(SystemOneDecision::new(&m.ollama_url, &m.decision_local_model, None)),
         is_cloud: !is_loopback_url(&m.ollama_url),
+    };
+    let tev1_names = LocalModels {
+        ollama_url: m.ollama_url.clone(),
+        answer_model: m.local_answer_model.clone(),
+        decision_model: m.decision_local_model.clone(),
     };
     let dcfg = DecisionRouterConfig {
         timeout: Duration::from_millis(cfg.timeouts.decision_ms),
@@ -80,26 +102,28 @@ pub fn build(cfg: &Config, secrets: &dyn SecretStore, clock: Arc<dyn Clock>, opt
                 m.ollama_url
             )));
         }
+        let warm = Warmer { cloud: vec![], local: Some(local_answer.clone()) };
         let answers = AnswerRouter::new(Mode::Local, redaction, vec![Route::new(local_answer)], None)?;
         let decisions = DecisionRouter::new(Mode::Local, None, tev1, dcfg, None)?;
-        return Ok(Models { answers, decisions, postcall: postcall_local, groq_budget: None });
+        return Ok(Models { answers, decisions, postcall: postcall_local, groq_budget: None, warm, tev1: tev1_names });
     }
 
     // ---- cloud mode ----
     let mut fast = Vec::new();
     let mut groq_budget = None;
+    let mut warm = Warmer::default();
     if let Some(k) = key(secrets, SecretKey::Groq)? {
         let b = Arc::new(BudgetTracker::new(cfg.groq_budget.clone(), clock));
-        fast.push(
-            Route::new(Arc::new(OpenAiCompat::groq(&opts.groq_base_url, &m.groq_model, k)))
-                .first_token_ms(cfg.timeouts.first_token_ms)
-                .budget(b.clone()),
-        );
+        let groq = Arc::new(OpenAiCompat::groq(&opts.groq_base_url, &m.groq_model, k));
+        warm.cloud.push(groq.clone());
+        fast.push(Route::new(groq).first_token_ms(cfg.timeouts.first_token_ms).budget(b.clone()));
         groq_budget = Some(b);
     }
     if let Some(k) = key(secrets, SecretKey::Gemini)? {
         let g = OpenAiCompat::gemini(&opts.gemini_base_url, &m.gemini_model, k, m.gemini_tier, cfg.testing)?;
-        fast.push(Route::new(Arc::new(g)));
+        let g = Arc::new(g);
+        warm.cloud.push(g.clone());
+        fast.push(Route::new(g).first_token_ms(GEMINI_FIRST_TOKEN_MS));
     }
     // Offline in cloud mode: the local model still answers.
     fast.push(Route::new(local_answer));
@@ -122,7 +146,7 @@ pub fn build(cfg: &Config, secrets: &dyn SecretStore, clock: Arc<dyn Clock>, opt
         _ => (None, None),
     };
     let decisions = DecisionRouter::new(Mode::Cloud, jev, tev1, dcfg, probe)?;
-    Ok(Models { answers, decisions, postcall, groq_budget })
+    Ok(Models { answers, decisions, postcall, groq_budget, warm, tev1: tev1_names })
 }
 
 /// `"provider/model"`: `anthropic/…` (Messages API), `openai/…`, `groq/…`, or any other provider
@@ -210,6 +234,7 @@ mod tests {
         assert!(!m.decisions.has_cloud());
         assert!(!m.postcall.is_cloud());
         assert!(m.groq_budget.is_none());
+        assert_eq!(m.warm.targets(), 1, "the local answer model is warmed");
     }
 
     #[test]
@@ -236,6 +261,7 @@ mod tests {
         assert!(m.decisions.has_cloud());
         assert!(m.postcall.is_cloud());
         assert!(m.groq_budget.is_some());
+        assert_eq!(m.warm.targets(), 2, "groq + gemini connections warmed; local fallback not preloaded");
     }
 
     #[test]

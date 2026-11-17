@@ -369,9 +369,10 @@ async fn run_loop_hotkey_not_blocked_by_hung_decision() {
     let ev = out_rx.recv().await.unwrap();
     assert_eq!(ev.trigger, Trigger::Hotkey);
     assert_eq!(before.elapsed(), Duration::ZERO, "hotkey waited on the decision model");
-    // The question still fires once the decision times out (heuristic fallback).
-    let ev = out_rx.recv().await.unwrap();
-    assert_eq!(ev.trigger, Trigger::Question);
+    // L6: the hotkey answered this utterance, so the automatic one is dropped once the decision
+    // times out (before: a second, duplicate answer).
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    assert!(out_rx.try_recv().is_err(), "no duplicate answer for the same utterance");
     cancel.cancel();
     task.await.unwrap();
 }
@@ -651,4 +652,90 @@ fn decision_input_stays_under_500_tokens() {
     // Small inputs pass through untouched.
     let small = decision_input(" How much? ", "Plan: Pro", &["sales".into()]);
     assert_eq!((small.question.as_str(), small.screen_diff.as_str()), ("How much?", "Plan: Pro"));
+}
+
+// ---------- speculation (H2), hotkey supersede (L6), no discarded tags (M5) ----------
+
+fn recorder() -> (SpeculationFn, Arc<std::sync::Mutex<Vec<Speculation>>>) {
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let l2 = log.clone();
+    (Arc::new(move |s| l2.lock().unwrap().push(s)), log)
+}
+
+#[tokio::test(start_paused = true)]
+async fn speculation_starts_before_the_decision_and_is_confirmed() {
+    let d = Arc::new(
+        MockDecision::always(decision_answer(Intent::Pricing, "support")).with_delay(Duration::from_millis(560)),
+    );
+    let (f, log) = recorder();
+    let clock = MockClock::new(T0);
+    let e = TriggerEngine::new(settings(Mode::Cloud), d.clone(), Arc::new(clock.clone())).with_speculation(f);
+    let out = ask(&e, &clock, "How much is the enterprise plan?").await;
+    assert_eq!(out.len(), 1);
+    let log = log.lock().unwrap().clone();
+    assert_eq!(log.len(), 1, "only Start; the confirm is the event itself: {log:?}");
+    let Speculation::Start(spec) = &log[0] else { panic!("{log:?}") };
+    assert_eq!(spec.answer_id, out[0].answer_id);
+    assert_eq!((spec.format, spec.tier, spec.profile.as_str()), (AnswerFormat::Fact, Tier::Fast, "sales"));
+    assert!(spec.decision.is_none());
+    // The decision may change the profile: the pipeline sees the difference and restarts.
+    assert_eq!(out[0].profile, "support");
+}
+
+#[tokio::test(start_paused = true)]
+async fn speculation_is_cancelled_when_the_decision_says_no() {
+    let d = Arc::new(MockDecision::always(decision_no_answer("sales")));
+    let (f, log) = recorder();
+    let clock = MockClock::new(T0);
+    let e = TriggerEngine::new(settings(Mode::Cloud), d, Arc::new(clock.clone())).with_speculation(f);
+    assert!(ask(&e, &clock, "How much is the enterprise plan?").await.is_empty());
+    let log = log.lock().unwrap().clone();
+    let [Speculation::Start(s), Speculation::Cancel(id)] = log.as_slice() else { panic!("{log:?}") };
+    assert_eq!(s.answer_id, *id);
+}
+
+#[tokio::test(start_paused = true)]
+async fn no_speculation_for_small_talk_screen_or_local_mode() {
+    let d = Arc::new(MockDecision::always(decision_answer(Intent::Pricing, "sales")));
+    let (f, log) = recorder();
+    let clock = MockClock::new(T0);
+    let e = TriggerEngine::new(settings(Mode::Cloud), d.clone(), Arc::new(clock.clone())).with_speculation(f.clone());
+    let _ = ask(&e, &clock, "How you dey").await; // small talk: the rules say nothing to show
+    assert!(log.lock().unwrap().is_empty());
+    let e = TriggerEngine::new(settings(Mode::Local), d, Arc::new(clock.clone())).with_speculation(f);
+    clock.advance(10_000);
+    assert_eq!(ask(&e, &clock, "How much is the enterprise plan?").await.len(), 1);
+    assert!(log.lock().unwrap().is_empty(), "local mode fires at once; nothing to overlap");
+}
+
+/// L6: the hotkey pressed while the automatic decision for the same utterance is in flight gives
+/// one answer, not two.
+#[tokio::test(start_paused = true)]
+async fn hotkey_during_in_flight_decision_supersedes_it() {
+    let d = Arc::new(
+        MockDecision::always(decision_answer(Intent::Pricing, "sales")).with_delay(Duration::from_millis(500)),
+    );
+    let (f, log) = recorder();
+    let clock = MockClock::new(T0);
+    let e = Arc::new(TriggerEngine::new(settings(Mode::Cloud), d, Arc::new(clock.clone())).with_speculation(f));
+    assert!(e.on_transcript(&them_end(&clock, "How much is the enterprise plan?")).await.is_empty());
+    clock.advance(e.settings().question_silence_ms);
+    let e2 = e.clone();
+    let auto = tokio::spawn(async move { e2.poll().await });
+    tokio::time::sleep(Duration::from_millis(100)).await; // decision in flight
+    let hot = e.hotkey();
+    assert_eq!(hot.question, "How much is the enterprise plan?");
+    assert!(auto.await.unwrap().is_empty(), "the automatic answer is dropped");
+    let log = log.lock().unwrap().clone();
+    assert!(matches!(log.as_slice(), [Speculation::Start(_), Speculation::Cancel(_)]), "{log:?}");
+}
+
+/// M5: local mode without a tag consumer runs no background decision at all.
+#[tokio::test(start_paused = true)]
+async fn local_mode_without_a_tag_sink_runs_no_decision() {
+    let d = Arc::new(MockDecision::always(decision_answer(Intent::Pricing, "sales")));
+    let (e, clock) = engine(Mode::Local, d.clone());
+    assert_eq!(ask(&e, &clock, "How much is the enterprise plan?").await.len(), 1);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(d.calls(), 0);
 }

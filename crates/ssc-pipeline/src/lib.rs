@@ -21,12 +21,14 @@
 pub mod clock;
 pub mod decision;
 pub mod limits;
+pub mod loopback_phone;
 pub mod pipeline;
 pub mod postcall;
 pub mod replay;
 pub mod stats;
 pub mod stt_select;
 pub mod system;
+pub mod timing_log;
 pub mod transport;
 
 pub use clock::TokioClock;
