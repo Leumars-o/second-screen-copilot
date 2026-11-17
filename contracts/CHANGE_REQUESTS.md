@@ -44,3 +44,10 @@ Format:
 - Why: "LAN first" will silently become "relay always" on real phones.
 - Options: (a) the PC serves the PWA over HTTPS on the LAN with a cert the phone trusts (hard on phones); (b) accept relay-only for the hosted PWA and keep LAN for a wrapped/native shell later; (c) add `wss://` LAN with a public DNS name pointing at the LAN IP plus a real cert (the plex.direct pattern). The lead should decide; nothing in the phone code changes for (b) or (c).
 - Status: open
+
+## CR-5 — Router settings missing from `Config`
+- From: W1-MODELS
+- What: add to `ssc_core::config::Models`: `gemini_tier: "paid" | "free"` (default `paid`), `strong_base_url: Option<String>`; add `testing: bool` (default false) and `redact_emails: bool` (default false) to `Config`.
+- Why: the Gemini free-tier gate ("free tier only when `testing`"), optional email redaction and non-standard strong-model providers need user-visible settings. Today they live in `ssc_router::RouterOptions` (defaults: paid, testing off, emails off), so the settings UI can't persist them.
+- Proposed diff: the four fields above with `#[serde(default)]`; `ssc_router::factory::build` then reads them from `Config` instead of `RouterOptions`.
+- Status: open (workaround in place: `RouterOptions`)

@@ -1,0 +1,281 @@
+//! Builds the answer and decision routers from [`Config`] + keys. The mode decides which clients
+//! exist: in local-only mode no cloud adapter is constructed and the secret store is never read.
+
+use crate::answer::{AnswerRouter, Route};
+use crate::budget::BudgetTracker;
+use crate::decision::{DecisionRouter, DecisionRouterConfig, DecisionSlot, HttpProbe, NetworkProbe, SystemOneDecision};
+use crate::providers::anthropic::ANTHROPIC_BASE_URL;
+use crate::providers::gemini::GEMINI_BASE_URL;
+use crate::providers::openai::{GROQ_BASE_URL, OPENAI_BASE_URL};
+use crate::providers::{Anthropic, Gemini, GeminiTier, Ollama, OpenAiCompat, is_loopback_url};
+use ssc_core::config::Config;
+use ssc_core::protocol::Mode;
+use ssc_core::secrets::{Secret, SecretKey, SecretStore};
+use ssc_core::traits::{AnswerModel, Clock};
+use ssc_core::{Result, SscError};
+use std::sync::Arc;
+use std::time::Duration;
+
+/// Router settings that aren't in `ssc-core::Config` (see CR-5).
+#[derive(Debug, Clone)]
+pub struct RouterOptions {
+    /// Declared tier of the Gemini key. `Free` is refused unless `testing`.
+    pub gemini_tier: GeminiTier,
+    /// Test builds only: allows the Gemini free tier.
+    pub testing: bool,
+    /// Also mask emails when redaction is on.
+    pub redact_emails: bool,
+    /// Base URL for a strong model whose provider isn't `anthropic`, `openai` or `groq`.
+    pub strong_base_url: Option<String>,
+    /// Strong model: fail over to the fast chain when no token arrives within this.
+    pub strong_first_token_ms: u64,
+    pub decision_probe_interval: Duration,
+    pub groq_base_url: String,
+    pub gemini_base_url: String,
+    pub anthropic_base_url: String,
+    pub openai_base_url: String,
+}
+
+impl Default for RouterOptions {
+    fn default() -> Self {
+        Self {
+            gemini_tier: GeminiTier::Paid,
+            testing: false,
+            redact_emails: false,
+            strong_base_url: None,
+            strong_first_token_ms: 4000,
+            decision_probe_interval: Duration::from_secs(10),
+            groq_base_url: GROQ_BASE_URL.into(),
+            gemini_base_url: GEMINI_BASE_URL.into(),
+            anthropic_base_url: ANTHROPIC_BASE_URL.into(),
+            openai_base_url: OPENAI_BASE_URL.into(),
+        }
+    }
+}
+
+pub struct Models {
+    pub answers: AnswerRouter,
+    pub decisions: DecisionRouter,
+    /// Summary / follow-up model (not time-critical): the strong model if configured in cloud
+    /// mode, else the local post-call model.
+    pub postcall: Arc<dyn AnswerModel>,
+    /// The Groq budget, for the debug panel.
+    pub groq_budget: Option<Arc<BudgetTracker>>,
+}
+
+fn key(secrets: &dyn SecretStore, k: SecretKey) -> Result<Option<Secret>> {
+    Ok(secrets.get(&k)?.filter(|s| !s.expose().trim().is_empty()))
+}
+
+/// Build every model client for `cfg.mode`.
+pub fn build(cfg: &Config, secrets: &dyn SecretStore, clock: Arc<dyn Clock>, opts: &RouterOptions) -> Result<Models> {
+    let redaction = cfg.redaction.then_some(ssc_redact::Options { emails: opts.redact_emails });
+    let m = &cfg.models;
+    let local_answer = Arc::new(Ollama::new(&m.ollama_url, &m.local_answer_model));
+    let postcall_local = Arc::new(Ollama::new(&m.ollama_url, &m.local_postcall_model));
+    let tev1 = DecisionSlot {
+        model: Arc::new(SystemOneDecision::new(&m.ollama_url, &m.decision_local_model, None)),
+        is_cloud: !is_loopback_url(&m.ollama_url),
+    };
+    let dcfg = DecisionRouterConfig {
+        timeout: Duration::from_millis(cfg.timeouts.decision_ms),
+        failover_after: cfg.timeouts.decision_failover_after,
+        probe_interval: opts.decision_probe_interval,
+        redaction,
+    };
+
+    if cfg.mode == Mode::Local {
+        // Local-only: Ollama on this machine, nothing else. No secret is read, no cloud client built.
+        if !is_loopback_url(&m.ollama_url) {
+            return Err(SscError::Policy(format!(
+                "local-only mode needs Ollama on this machine, not {}",
+                m.ollama_url
+            )));
+        }
+        let answers = AnswerRouter::new(Mode::Local, redaction, vec![Route::new(local_answer)], None)?;
+        let decisions = DecisionRouter::new(Mode::Local, None, tev1, dcfg, None)?;
+        return Ok(Models { answers, decisions, postcall: postcall_local, groq_budget: None });
+    }
+
+    // ---- cloud mode ----
+    let mut fast = Vec::new();
+    let mut groq_budget = None;
+    if let Some(k) = key(secrets, SecretKey::Groq)? {
+        let b = Arc::new(BudgetTracker::new(cfg.groq_budget.clone(), clock));
+        fast.push(
+            Route::new(Arc::new(OpenAiCompat::groq(&opts.groq_base_url, &m.groq_model, k)))
+                .first_token_ms(cfg.timeouts.first_token_ms)
+                .budget(b.clone()),
+        );
+        groq_budget = Some(b);
+    }
+    if let Some(k) = key(secrets, SecretKey::Gemini)? {
+        let g = Gemini::new(&opts.gemini_base_url, &m.gemini_model, k, opts.gemini_tier, opts.testing)?;
+        fast.push(Route::new(Arc::new(g)));
+    }
+    // Offline in cloud mode: the local model still answers.
+    fast.push(Route::new(local_answer));
+
+    let strong = match &m.strong_model {
+        Some(spec) if !spec.trim().is_empty() => build_strong(spec, secrets, opts)?,
+        _ => None,
+    };
+    let postcall: Arc<dyn AnswerModel> = strong.clone().unwrap_or(postcall_local);
+    let strong_route = strong.map(|s| Route::new(s).first_token_ms(opts.strong_first_token_ms));
+    let answers = AnswerRouter::new(Mode::Cloud, redaction, fast, strong_route)?;
+
+    let base = m.decision_cloud_base_url.trim();
+    let (jev, probe) = match key(secrets, SecretKey::TypeSafe)? {
+        Some(k) if !base.is_empty() => {
+            let jev = SystemOneDecision::new(base, &m.decision_cloud_model, Some(k));
+            let probe: Arc<dyn NetworkProbe> = Arc::new(HttpProbe::new(base));
+            (Some(DecisionSlot { is_cloud: jev.is_cloud(), model: Arc::new(jev) }), Some(probe))
+        }
+        _ => (None, None),
+    };
+    let decisions = DecisionRouter::new(Mode::Cloud, jev, tev1, dcfg, probe)?;
+    Ok(Models { answers, decisions, postcall, groq_budget })
+}
+
+/// `"provider/model"`: `anthropic/…` (Messages API), `openai/…`, `groq/…`, or any other provider
+/// name with `strong_base_url` set (OpenAI-compatible). Missing key → no strong tier.
+fn build_strong(spec: &str, secrets: &dyn SecretStore, opts: &RouterOptions) -> Result<Option<Arc<dyn AnswerModel>>> {
+    let (provider, model) = spec
+        .split_once('/')
+        .ok_or_else(|| SscError::Invalid(format!("strong_model must be provider/model: {spec}")))?;
+    let strong_key = key(secrets, SecretKey::Strong)?;
+    let m: Arc<dyn AnswerModel> = match provider {
+        "anthropic" => match strong_key {
+            Some(k) => Arc::new(Anthropic::new(&opts.anthropic_base_url, model, k)),
+            None => return Ok(None),
+        },
+        "openai" => match strong_key {
+            Some(k) => Arc::new(OpenAiCompat::new("openai", &opts.openai_base_url, model, k)),
+            None => return Ok(None),
+        },
+        "groq" => match strong_key.or(key(secrets, SecretKey::Groq)?) {
+            Some(k) => Arc::new(OpenAiCompat::groq(&opts.groq_base_url, model, k)),
+            None => return Ok(None),
+        },
+        other => {
+            let base = opts
+                .strong_base_url
+                .as_deref()
+                .ok_or_else(|| SscError::Invalid(format!("strong provider '{other}' needs strong_base_url")))?;
+            match strong_key {
+                Some(k) => Arc::new(OpenAiCompat::new(other, base, model, k)),
+                None => return Ok(None),
+            }
+        }
+    };
+    Ok(Some(m))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ssc_core::mock::MockClock;
+    use ssc_core::secrets::MemorySecretStore;
+
+    /// A secret store that fails the test if anything reads it.
+    struct NoSecrets;
+    impl SecretStore for NoSecrets {
+        fn get(&self, key: &SecretKey) -> Result<Option<Secret>> {
+            panic!("local-only mode read secret {key:?}");
+        }
+        fn set(&self, _: &SecretKey, _: &Secret) -> Result<()> {
+            panic!("set")
+        }
+        fn delete(&self, _: &SecretKey) -> Result<()> {
+            panic!("delete")
+        }
+    }
+
+    fn all_keys() -> MemorySecretStore {
+        let s = MemorySecretStore::default();
+        for k in [SecretKey::Groq, SecretKey::Gemini, SecretKey::TypeSafe, SecretKey::Strong] {
+            s.set(&k, &Secret::new("test-key")).unwrap();
+        }
+        s
+    }
+
+    fn cloud_cfg() -> Config {
+        let mut c = Config::default();
+        c.models.strong_model = Some("anthropic/strong-model".into());
+        c.models.decision_cloud_base_url = "https://decisions.example.com".into();
+        c
+    }
+
+    #[test]
+    fn local_only_builds_no_cloud_client_and_reads_no_secret() {
+        // Every cloud option configured, all keys "available": local mode must ignore them all.
+        let cfg = Config { mode: Mode::Local, ..cloud_cfg() };
+        let m = build(&cfg, &NoSecrets, Arc::new(MockClock::new(0)), &RouterOptions::default()).unwrap();
+        let models = m.answers.models();
+        assert_eq!(models.len(), 1);
+        assert!(models.iter().all(|x| !x.is_cloud()), "{:?}", models.iter().map(|x| x.id()).collect::<Vec<_>>());
+        assert!(models[0].id().starts_with("ollama/"));
+        assert!(!m.answers.has_strong());
+        assert!(!m.decisions.has_cloud());
+        assert!(!m.postcall.is_cloud());
+        assert!(m.groq_budget.is_none());
+    }
+
+    #[test]
+    fn local_only_refuses_remote_ollama() {
+        let mut cfg = Config { mode: Mode::Local, ..Config::default() };
+        cfg.models.ollama_url = "http://192.168.1.50:11434".into();
+        let r = build(&cfg, &NoSecrets, Arc::new(MockClock::new(0)), &RouterOptions::default());
+        assert!(matches!(r, Err(SscError::Policy(_))));
+    }
+
+    #[test]
+    fn cloud_chain_order() {
+        let m = build(&cloud_cfg(), &all_keys(), Arc::new(MockClock::new(0)), &RouterOptions::default()).unwrap();
+        let ids: Vec<String> = m.answers.models().iter().map(|x| x.id().to_string()).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "groq/openai/gpt-oss-120b",
+                "gemini/gemini-2.5-flash-lite",
+                "ollama/gemma4:e2b",
+                "anthropic/strong-model"
+            ]
+        );
+        assert!(m.decisions.has_cloud());
+        assert!(m.postcall.is_cloud());
+        assert!(m.groq_budget.is_some());
+    }
+
+    #[test]
+    fn cloud_without_keys_falls_back_to_local() {
+        let m =
+            build(&cloud_cfg(), &MemorySecretStore::default(), Arc::new(MockClock::new(0)), &RouterOptions::default())
+                .unwrap();
+        let ids: Vec<String> = m.answers.models().iter().map(|x| x.id().to_string()).collect();
+        assert_eq!(ids, vec!["ollama/gemma4:e2b"]);
+        assert!(!m.decisions.has_cloud());
+    }
+
+    #[test]
+    fn gemini_free_tier_refused_outside_testing() {
+        let opts = RouterOptions { gemini_tier: GeminiTier::Free, ..Default::default() };
+        let r = build(&cloud_cfg(), &all_keys(), Arc::new(MockClock::new(0)), &opts);
+        assert!(matches!(r, Err(SscError::Policy(_))));
+        let opts = RouterOptions { gemini_tier: GeminiTier::Free, testing: true, ..Default::default() };
+        assert!(build(&cloud_cfg(), &all_keys(), Arc::new(MockClock::new(0)), &opts).is_ok());
+    }
+
+    #[test]
+    fn strong_provider_variants() {
+        let s = all_keys();
+        let o = RouterOptions::default();
+        assert_eq!(build_strong("openai/gpt-x", &s, &o).unwrap().unwrap().id(), "openai/gpt-x");
+        assert_eq!(build_strong("groq/qwen/qwen3", &s, &o).unwrap().unwrap().id(), "groq/qwen/qwen3");
+        assert!(build_strong("openrouter/x", &s, &o).is_err());
+        let o2 = RouterOptions { strong_base_url: Some("https://openrouter.ai/api/v1".into()), ..Default::default() };
+        assert_eq!(build_strong("openrouter/a/b", &s, &o2).unwrap().unwrap().id(), "openrouter/a/b");
+        assert!(build_strong("nomodel", &s, &o).is_err());
+        assert!(build_strong("anthropic/x", &MemorySecretStore::default(), &o).unwrap().is_none());
+    }
+}

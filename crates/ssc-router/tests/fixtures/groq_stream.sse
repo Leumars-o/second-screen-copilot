@@ -1,0 +1,14 @@
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1731650000,"model":"openai/gpt-oss-120b","choices":[{"index":0,"delta":{"role":"assistant","content":""},"logprobs":null,"finish_reason":null}],"x_groq":{"id":"req_fixture"}}
+
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1731650000,"model":"openai/gpt-oss-120b","choices":[{"index":0,"delta":{"content":"1. Requirements\n"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1731650000,"model":"openai/gpt-oss-120b","choices":[{"index":0,"delta":{"content":"2. Design\n3."},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1731650000,"model":"openai/gpt-oss-120b","choices":[{"index":0,"delta":{"content":" Build\n---\n"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1731650000,"model":"openai/gpt-oss-120b","choices":[{"index":0,"delta":{"content":"1: Ask about users\n"},"logprobs":null,"finish_reason":null}]}
+
+data: {"id":"chatcmpl-fixture","object":"chat.completion.chunk","created":1731650000,"model":"openai/gpt-oss-120b","choices":[{"index":0,"delta":{},"logprobs":null,"finish_reason":"stop"}],"x_groq":{"id":"req_fixture","usage":{"queue_time":0.01,"prompt_tokens":950,"prompt_time":0.02,"completion_tokens":17,"completion_time":0.03,"total_tokens":967,"total_time":0.05}}}
+
+data: [DONE]
+
