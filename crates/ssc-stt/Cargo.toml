@@ -4,9 +4,29 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
+description = "Streaming speech-to-text: Deepgram (cloud) and whisper.cpp (local, feature `local-stt`)."
+
+[features]
+default = []
+# whisper.cpp via whisper-rs. Needs cmake + a C++ toolchain; not built by the default gate.
+local-stt = ["dep:whisper-rs"]
+# Tests that call real providers (Deepgram key in the OS keychain). Skipped by the gate.
+live = []
 
 [dependencies]
 ssc-core.workspace = true
+ssc-audio = { path = "../ssc-audio" }
+tokio = { workspace = true, features = ["net"] }
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures-util = { version = "0.3", default-features = false, features = ["sink", "std"] }
+tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
+whisper-rs = { version = "0.16", optional = true }
+
+[dev-dependencies]
+hound = "3.5"
+tokio = { workspace = true, features = ["test-util", "net"] }
 
 [lints]
 workspace = true
