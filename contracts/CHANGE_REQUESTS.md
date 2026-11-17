@@ -43,7 +43,7 @@ Format:
 - What: A PWA served over HTTPS (needed for the service worker, the camera and WebCrypto) cannot open `ws://<lan-ip>` URLs. Browsers block it as mixed content, and Chrome's Private Network Access rules add more limits. If the PWA is served over plain http from the PC instead, it loses the camera, WebCrypto and the service worker. The QR's first URL is therefore unusable in the hosted case, and the phone falls back to the relay.
 - Why: "LAN first" will silently become "relay always" on real phones.
 - Options: (a) the PC serves the PWA over HTTPS on the LAN with a cert the phone trusts (hard on phones); (b) accept relay-only for the hosted PWA and keep LAN for a wrapped/native shell later; (c) add `wss://` LAN with a public DNS name pointing at the LAN IP plus a real cert (the plex.direct pattern). The lead should decide; nothing in the phone code changes for (b) or (c).
-- Status: open
+- Status: accepted (user, 2026-11-17): option (c), LAN `wss://` on the user's Cloudflare sub-domain (DNS-only A record → LAN IP, Let's Encrypt via DNS-01). Implemented in Wave 2; see Build Sheet §10 item 7.
 
 ## CR-5 — Router settings missing from `Config`
 - From: W1-MODELS
