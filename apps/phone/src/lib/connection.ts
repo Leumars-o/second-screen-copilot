@@ -1,10 +1,20 @@
 // Pairing persistence + the live link. localStorage holds the direction keys (not the phone
-// private key, which is discarded after deriving them) and the seq state (CR-3).
+// private key, which is discarded after deriving them) and the seq state, scoped to the pairing
+// (contracts/crypto/README.md § Frames, seq scope).
 import { parseQr, PhoneLink, startPairing, type ChannelState, type LinkStatus, type Pairing, type WsLike } from "@ssc/protocol";
 import type { Copilot } from "./copilot";
 
 const PAIRING_KEY = "ssc.pairing.v1";
 const LINK_KEY = "ssc.link.v1";
+/** Seq persistence is batched, so a crash can lose the last few sends. Jump ahead on restart
+ * (README: "persist a reservation and jump to it"); gaps are fine, going backwards is not. */
+export const SEQ_RESERVATION = 1000;
+
+/** Saved link state as restored on startup: next-send seq jumps past anything possibly sent. */
+export function restoreLinkState(saved: { state: ChannelState; sessionId: string | null } | null) {
+  if (!saved) return null;
+  return { ...saved, state: { ...saved.state, nextSendSeq: saved.state.nextSendSeq + SEQ_RESERVATION } };
+}
 
 interface StoredPairing {
   pairing: Pairing;
@@ -74,7 +84,7 @@ export function connect(
   hooks: { onStatus: (s: LinkStatus) => void; onPaired: () => void },
   ws: (url: string) => WsLike = (url) => new WebSocket(url) as unknown as WsLike,
 ): LinkHandle {
-  const prev = read<StoredLink>(LINK_KEY);
+  const prev = restoreLinkState(read<StoredLink>(LINK_KEY));
   let pending: StoredLink | null = null;
   let flushScheduled = false;
   // Persist at most once per macrotask: deltas arrive in bursts.

@@ -14,6 +14,16 @@ const e = (type: AnyEnvelope["type"], payload: unknown, seq: number) => ({ v: 1,
 
 describe("answer card render", () => {
   it("applies 200 deltas, each < 16 ms, append-only", () => {
+    // Warm-up on a throwaway card so one-time JIT/jsdom initialisation is not counted as a delta.
+    {
+      const w = new Copilot({ send: () => true, afterPaint: () => undefined });
+      w.handle(e("answer.start", { answer_id: AID, trigger: "hotkey", format: "cue", intent: "none", urgency: "low", model: "m" }, 1));
+      const wh = document.createElement("div");
+      const wr = createRoot(wh);
+      act(() => wr.render(<AnswerCard copilot={w} answer={w.answer(AID)!} current />));
+      for (let i = 0; i < 50; i++) w.handle(e("answer.delta", { answer_id: AID, block: i % 2 ? "detail" : "cue", text: "x " }, i + 2));
+      act(() => wr.unmount());
+    }
     const c = new Copilot({ send: () => true, afterPaint: () => undefined });
     c.handle(e("answer.start", { answer_id: AID, trigger: "hotkey", format: "cue", intent: "none", urgency: "low", model: "m" }, 1));
     const host = document.createElement("div");
@@ -35,7 +45,8 @@ describe("answer card render", () => {
     }
     unsub();
 
-    expect(Math.max(...times)).toBeLessThan(16);
+    const slow = times.map((t, i) => [i, +t.toFixed(2)]).filter(([, t]) => t! >= 16);
+    expect(slow, "deltas that took >= 16 ms: [index, ms]").toEqual([]);
     expect(renders).toBe(0); // no React state change per delta
     expect(cueEl.firstChild).toBe(firstNode);
     expect(firstNode).not.toBeNull();

@@ -30,7 +30,7 @@ export interface ChannelOptions {
   recvKey: Uint8Array;
   state?: ChannelState;
   now?: () => number;
-  /** Called after every state change, so callers can persist seq across reconnects (CR-3). */
+  /** Called after every state change, so callers can persist seq across reconnects (README § Frames, seq scope). */
   onState?: (s: ChannelState) => void;
 }
 

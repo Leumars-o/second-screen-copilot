@@ -19,21 +19,21 @@ Format:
 - Why: Without a defined way to recover the AAD, the PC and phone may each pick a different workaround and stop interoperating.
 - Workaround in TS (`packages/protocol-ts/src/crypto.ts` `openFrame`, marked `CR-1`): compute the unauthenticated candidate plaintext (`ct_body XOR XChaCha20 keystream from block 1`), read `session_id` and `seq` from it, then run the full AEAD decrypt with that AAD. Nothing is trusted unless the tag verifies. This works with the frozen vectors and with any sender that follows the README. In Rust, `chacha20::XChaCha20` seeked to byte 64 does the same.
 - Proposed diff (pick one): (a) add the paragraph above to `contracts/crypto/README.md` as the normative receive algorithm (no wire change, vectors stay valid); or (b) v2 frame `0x02 || seq u64 BE || sid_len u8 || sid || nonce || ct`, which needs new vectors. Recommendation: (a).
-- Status: open
+- Status: accepted (contracts-v1.1), option (a): normative receive algorithm in contracts/crypto/README.md
 
 ## CR-2 — Transport framing of the plaintext pair.hello and pairing confirmation
 - From: W1-PHONE
 - What: The README does not say how the single plaintext frame is carried, or how the phone learns that pairing succeeded.
 - Phone behaviour (CR-2 comments in `client.ts`): `pair.hello` is sent as a WebSocket **text** message (UTF-8 envelope JSON). Every encrypted frame is a **binary** message. The phone treats the first authentic encrypted frame from the PC (the mock sends a `heartbeat`) as pairing confirmation. The PC closes the socket on a failed proof.
 - Proposed diff: add those three sentences to `contracts/crypto/README.md` § Pairing.
-- Status: open
+- Status: accepted (contracts-v1.1) as amended: binary 0x00 framing (`0x00 || envelope JSON`), per CR-R1
 
 ## CR-3 — Scope of `seq` across reconnects
 - From: W1-PHONE
 - What: The contract does not say whether `seq` (and the receiver's last-accepted value) resets on a new WebSocket connection or a LAN↔relay switch.
 - Phone behaviour: seq state is per pairing. It is persisted in localStorage and keeps increasing across reconnects and reloads, so the relay cannot replay frames from an earlier connection. If the PC resets its counter on reconnect, the phone drops every frame as a replay.
 - Proposed diff: README § Frames: "`seq` is scoped to the pairing (the key pair), not to a connection. Both sides persist next-send and last-accepted values across reconnects and restarts."
-- Status: open
+- Status: accepted (contracts-v1.1)
 
 ## CR-4 — LAN `ws://` from an HTTPS-hosted PWA is blocked as mixed content
 - From: W1-PHONE

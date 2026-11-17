@@ -21,6 +21,8 @@ import {
   toHex,
   verifyPairHello,
   decodeEnvelope,
+  helloFrame,
+  parseHelloFrame,
 } from "../src/index";
 
 interface Frame {
@@ -212,5 +214,20 @@ describe("pairing", () => {
     const wrongToken = new Uint8Array(32).fill(7);
     await expect(verifyPairHello(hello, { privateKey: pcPriv, token: wrongToken, exp: 2_000_000_000 }, 1_000)).rejects.toThrow(/bad proof/);
     await expect(verifyPairHello(hello, { privateKey: pcPriv, token, exp: 1 }, 1_000_000)).rejects.toThrow(/expired/);
+  });
+
+  it("pair.hello wire framing is binary 0x00 || envelope JSON", async () => {
+    const qr = parseQr(qrText, 1_000);
+    const p = await startPairing(qr, "Pixel 9", { keyPair: { privateKey: phonePriv, publicKey: fromHex(V.phone_pub_hex) }, nowMs: 1_000 });
+    const wire = helloFrame(p.hello);
+    expect(wire[0]).toBe(0x00);
+    expect(dec.decode(wire.subarray(1))).toBe(p.hello);
+    expect(parseHelloFrame(wire).payload.proof).toBe(V.proof_b64);
+    const asV1 = wire.slice();
+    asV1[0] = 0x01;
+    expect(() => parseHelloFrame(asV1)).toThrow(/not a pair.hello frame/);
+    expect(() => parseHelloFrame(new Uint8Array([0]))).toThrow();
+    const heartbeat = JSON.stringify({ v: 1, type: "heartbeat", seq: 0, ts: 1, session_id: null, payload: {} });
+    expect(() => parseHelloFrame(helloFrame(heartbeat))).toThrow(/expected pair.hello/);
   });
 });

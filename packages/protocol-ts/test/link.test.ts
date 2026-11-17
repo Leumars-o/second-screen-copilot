@@ -3,7 +3,7 @@ import { createServer } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import WebSocket from "ws";
 import { MockPc } from "../mock-server/server";
-import { parseQr, PhoneLink, startPairing, type AnyEnvelope, type ChannelState, type LinkStatus, type WsLike } from "../src/index";
+import { helloFrame, parseQr, PhoneLink, startPairing, type AnyEnvelope, type ChannelState, type LinkStatus, type WsLike } from "../src/index";
 
 const wsFactory = (url: string) => new WebSocket(url) as unknown as WsLike;
 
@@ -92,5 +92,28 @@ describe("PhoneLink <-> mock PC", () => {
     const cmd = pc!.received.find((e) => e.type === "command")!;
     expect(cmd.seq).toBeGreaterThanOrEqual(before);
     expect(pc!.pairedCount).toBe(1); // hello is sent only once
+  });
+
+  it("mock PC closes the socket on a text frame and on a bad proof, then accepts a good hello", async () => {
+    pc = await new MockPc().start();
+    const closeCode = (send: (ws: WebSocket) => void) =>
+      new Promise<number>((resolve) => {
+        const ws = new WebSocket(pc!.lanUrl);
+        ws.on("open", () => send(ws));
+        ws.on("close", (code) => resolve(code));
+      });
+    const qr = parseQr(JSON.stringify(pc.qr));
+    const good = await startPairing(qr, "Phone");
+    expect(await closeCode((ws) => ws.send(good.hello))).toBe(1003); // text, not binary
+    const forged = JSON.parse(good.hello);
+    forged.payload.proof = "A".repeat(43) + "=";
+    expect(await closeCode((ws) => ws.send(helloFrame(JSON.stringify(forged))))).toBe(4002);
+    expect(pc.pairedCount).toBe(0);
+    // A bad attempt does not burn the token (only 5 do): the real hello still pairs.
+    const ws = new WebSocket(pc.lanUrl);
+    await new Promise((r) => ws.on("open", r));
+    ws.send(helloFrame(good.hello));
+    await until(() => pc!.pairedCount === 1);
+    ws.close();
   });
 });

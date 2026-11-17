@@ -2,7 +2,7 @@
 // heartbeat, reconnects when the link dies. Transport-agnostic: pass any WebSocket constructor.
 import { SecureChannel, type ChannelState } from "./channel";
 import type { AnyEnvelope, Outgoing } from "./envelope";
-import { pairingKeys, type Pairing } from "./pairing";
+import { helloFrame, pairingKeys, type Pairing } from "./pairing";
 
 export const HEARTBEAT_MS = 5_000;
 export const DEAD_AFTER_MS = 15_000;
@@ -35,7 +35,7 @@ export interface LinkOptions {
   ws: WsFactory;
   onEnvelope: (env: AnyEnvelope) => void;
   onStatus?: (s: LinkStatus) => void;
-  /** Persist seq state and the active session so a reload does not reset replay protection (CR-3). */
+  /** Persist seq state and the active session so a reload does not reset replay protection (README § Frames, seq scope). */
   onPersist?: (s: { state: ChannelState; sessionId: string | null; helloSent: boolean }) => void;
   /** Called once the PC has answered the pair.hello with a valid encrypted frame. */
   onPaired?: () => void;
@@ -158,7 +158,7 @@ export class PhoneLink {
       const via = /^wss?:\/\/[^/]+\/r\//.test(url) ? "relay" : "lan";
       this.opts.onStatus?.({ state: "connected", url, via });
       if (this.hello !== undefined) {
-        ws.send(this.hello); // CR-2: the single plaintext frame goes as a text message.
+        ws.send(helloFrame(this.hello)); // the single plaintext frame: binary 0x00 || JSON (README § Pairing)
         this.hello = undefined;
         this.persist();
       }
@@ -168,7 +168,7 @@ export class PhoneLink {
     };
     ws.onmessage = (ev) => {
       const bytes = toBytes(ev.data);
-      if (!bytes) return; // text frames from the PC are never valid after pairing
+      if (!bytes) return; // the PC only sends binary 0x01 frames
       this.recvChain = this.recvChain.then(() => this.receive(bytes)).catch(() => undefined);
     };
     ws.onerror = () => undefined;

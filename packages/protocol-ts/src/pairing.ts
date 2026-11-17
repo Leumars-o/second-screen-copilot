@@ -1,6 +1,6 @@
 // Pairing: QR parse -> phone keypair -> plaintext pair.hello with proof -> direction keys.
 import type { QrPayload } from "./generated/types";
-import { encodeEnvelope, type Envelope } from "./envelope";
+import { decodeEnvelope, encodeEnvelope, type Envelope } from "./envelope";
 import { validateQr } from "./validate";
 import {
   deriveKeys,
@@ -52,9 +52,28 @@ export interface Pairing {
 
 export interface PairStart {
   pairing: Pairing;
-  /** UTF-8 JSON of the plaintext pair.hello envelope (seq 0, session_id null). Sent once as a text frame (CR-2). */
+  /** JSON of the plaintext pair.hello envelope (seq 0, session_id null). Send once with `helloFrame` (README § Pairing). */
   hello: string;
   keys: DirectionKeys;
+}
+
+export const HELLO_FRAME_VERSION = 0x00;
+
+/** Wire form of pair.hello (contracts/crypto/README.md § Pairing): binary `0x00 || envelope JSON (UTF-8)`. */
+export function helloFrame(helloJson: string): Uint8Array {
+  const body = new TextEncoder().encode(helloJson);
+  const out = new Uint8Array(1 + body.length);
+  out[0] = HELLO_FRAME_VERSION;
+  out.set(body, 1);
+  return out;
+}
+
+/** PC side: parse and validate a `0x00` frame. Throws on a wrong version byte, bad JSON or a non-pair.hello envelope. */
+export function parseHelloFrame(wire: Uint8Array): Envelope<"pair.hello"> {
+  if (wire.length < 2 || wire[0] !== HELLO_FRAME_VERSION) throw new PairingError("not a pair.hello frame");
+  const env = decodeEnvelope(wire.subarray(1));
+  if (env.type !== "pair.hello") throw new PairingError("expected pair.hello");
+  return env;
 }
 
 export async function startPairing(

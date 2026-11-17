@@ -166,19 +166,19 @@ export async function openFrameWithAad(key: Uint8Array, wire: Uint8Array, aad: U
 }
 
 /**
- * CR-1: the AAD binds `session_id` and `seq`, but neither travels in clear on the wire, so the
- * receiver cannot know the AAD before decrypting. We recover the *unauthenticated* candidate
- * plaintext with the XChaCha20 keystream (the AEAD's ciphertext is plaintext XOR keystream from
- * block 1, so sealing the ciphertext body with the same key/nonce yields the plaintext; the
- * output is never sent), read `session_id` and `seq` from it, then run the real AEAD verify with
- * that AAD. Nothing from the candidate is trusted unless the tag verifies.
+ * Normative receive algorithm (contracts/crypto/README.md § Frames, "Receive algorithm").
+ * `session_id` and `seq` are not in the clear, so: recover the *unauthenticated* candidate
+ * plaintext with the XChaCha20 keystream from block 1 (the AEAD's ciphertext is plaintext XOR
+ * that keystream, so sealing the ciphertext body with the same key/nonce yields the plaintext; the
+ * output is never sent), read only `session_id` and `seq` from it, then run the full AEAD open
+ * with that AAD. Nothing from the candidate is trusted unless the tag verifies.
  */
 export async function openFrame(
   key: Uint8Array,
   wire: Uint8Array,
 ): Promise<{ plaintext: Uint8Array; sessionId: string | null; seq: number } | null> {
   const na = await ready();
-  if (wire.length < 1 + NONCE_BYTES + TAG_BYTES || wire[0] !== FRAME_VERSION) return null;
+  if (wire.length < 1 + NONCE_BYTES + TAG_BYTES || wire[0] !== FRAME_VERSION) return null; // >= 41 bytes, 0x01
   const nonce = wire.subarray(1, 1 + NONCE_BYTES);
   const body = wire.subarray(1 + NONCE_BYTES, wire.length - TAG_BYTES);
   const candidate = na.crypto_aead_xchacha20poly1305_ietf_encrypt(body, null, null, nonce, key).subarray(0, body.length);

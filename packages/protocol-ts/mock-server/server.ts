@@ -1,4 +1,4 @@
-// Mock PC: speaks the real protocol (plaintext pair.hello, then encrypted frames) over a Node
+// Mock PC: speaks the real protocol (binary 0x00 pair.hello, then 0x01 encrypted frames) over a Node
 // WebSocket, and exposes a small HTTP control API for E2E tests. Optionally serves a static dir
 // (the phone's `out/`) on the same origin, so the page is a secure context (localhost).
 import { randomUUID } from "node:crypto";
@@ -7,7 +7,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { extname, join, normalize, resolve } from "node:path";
 import { WebSocketServer, type WebSocket } from "ws";
 import {
-  decodeEnvelope,
+  HELLO_FRAME_VERSION,
+  parseHelloFrame,
   generateKeyPair,
   roomId,
   SecureChannel,
@@ -84,6 +85,7 @@ export class MockPc {
   private pcPriv!: Uint8Array;
   private token!: Uint8Array;
   private tokenBurned = false;
+  private badHellos = 0;
   private keys: { pcToPhone: Uint8Array; phoneToPc: Uint8Array } | null = null;
   private channel: SecureChannel | null = null;
   private socket: WebSocket | null = null;
@@ -129,6 +131,7 @@ export class MockPc {
     this.pcPriv = kp.privateKey;
     this.token = crypto.getRandomValues(new Uint8Array(32));
     this.tokenBurned = false;
+    this.badHellos = 0;
     this.keys = null;
     this.channel = null;
     const lan = this.lanUrl;
@@ -149,27 +152,30 @@ export class MockPc {
   }
 
   private async onMessage(ws: WebSocket, data: Buffer, isBinary: boolean): Promise<void> {
-    if (!isBinary) {
-      // The single plaintext frame: pair.hello (CR-2).
+    // Every frame is binary (README § Pairing / § Frames); text messages are a protocol error.
+    if (!isBinary) return void ws.close(1003, "binary frames only");
+    const wire = new Uint8Array(data);
+    if (wire[0] === HELLO_FRAME_VERSION) {
+      // The single plaintext frame: 0x00 || pair.hello JSON.
       if (this.tokenBurned) return void ws.close(4001, "token used");
-      this.tokenBurned = true; // one use, even on failure
       try {
-        const env = decodeEnvelope(data.toString("utf8"));
-        if (env.type !== "pair.hello") throw new Error("expected pair.hello");
+        const env = parseHelloFrame(wire);
         this.keys = await verifyPairHello(env, { privateKey: this.pcPriv, token: this.token, exp: this.qr.exp });
+        this.tokenBurned = true; // one use
         this.channel = new SecureChannel({ sendKey: this.keys.pcToPhone, recvKey: this.keys.phoneToPc });
         this.received.push(env);
         this.pairedCount++;
         this.log(`paired with ${env.payload.device_name}`);
         await this.send({ type: "heartbeat", payload: {} }); // confirms pairing to the phone
       } catch (e) {
+        if (++this.badHellos >= 5) this.tokenBurned = true; // burned after 5 bad attempts
         this.log(`pairing failed: ${(e as Error).message}`);
-        ws.close(4002, "pairing failed");
+        ws.close(4002, "pairing failed"); // bad proof closes the socket
       }
       return;
     }
     if (!this.channel) return;
-    const env = await this.channel.open(new Uint8Array(data));
+    const env = await this.channel.open(wire);
     if (!env) return;
     this.received.push(env);
     if (env.type === "heartbeat") {
