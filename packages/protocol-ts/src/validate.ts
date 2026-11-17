@@ -1,9 +1,9 @@
 // Runtime validation against the contract schemas (draft 2020-12), mirroring
 // ssc_core::protocol::validate: the envelope first, then the payload by `type`.
-import Ajv2020 from "ajv/dist/2020.js";
 import type { ValidateFunction } from "ajv";
-import { ENVELOPE_SCHEMA, MESSAGE_SCHEMAS, MESSAGE_TYPES, QR_SCHEMA } from "./generated/schemas";
+import { MESSAGE_TYPES } from "./generated/schemas";
 import type { QrPayload } from "./generated/types";
+import * as compiled from "./generated/validators";
 import type { AnyEnvelope, MessageType } from "./envelope";
 
 export class ProtocolError extends Error {
@@ -24,14 +24,20 @@ interface Validators {
 
 let cached: Validators | undefined;
 
+// Precompiled at generate time (Ajv standalone, same options: strict, strictTypes off, formats
+// off), so validation never evaluates generated code at runtime and the PWA's CSP can forbid
+// 'unsafe-eval' (CR-15).
 function validators(): Validators {
   if (cached) return cached;
-  // strict mode stays on (unknown keywords are errors) except strictTypes, which only warns about
-  // `oneOf` branches declaring their own `type`, a legal pattern the contract uses on purpose.
-  const ajv = new Ajv2020({ strict: true, strictTypes: false, allErrors: false, validateFormats: false });
+  const all = compiled as unknown as Record<string, ValidateFunction>;
+  const get = (name: string): ValidateFunction => {
+    const v = all[name];
+    if (!v) throw new Error(`no precompiled validator ${name} (run pnpm --filter @ssc/protocol generate)`);
+    return v;
+  };
   const payloads = new Map<string, ValidateFunction>();
-  for (const t of MESSAGE_TYPES) payloads.set(t, ajv.compile(MESSAGE_SCHEMAS[t]));
-  cached = { envelope: ajv.compile(ENVELOPE_SCHEMA), qr: ajv.compile(QR_SCHEMA), payloads };
+  for (const t of MESSAGE_TYPES) payloads.set(t, get(`msg_${t.replace(/\W/g, "_")}`));
+  cached = { envelope: get("envelope"), qr: get("qr"), payloads };
   return cached;
 }
 

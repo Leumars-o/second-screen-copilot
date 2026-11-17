@@ -6,18 +6,19 @@
   "description": "Second Screen Copilot phone PWA (Next.js static export).",
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "next build && node scripts/csp.mjs",
     "mock": "tsx ../../packages/protocol-ts/mock-server/cli.ts --port 4710 --static out",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run && pnpm run e2e",
     "test:unit": "vitest run",
-    "e2e": "playwright install chromium && next build && playwright test"
+    "e2e": "playwright install chromium && pnpm run build && playwright test"
   },
   "devDependencies": {
     "@playwright/test": "1.57.0",
     "@types/node": "^26.6.6",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
+    "fake-indexeddb": "^6.2.8",
     "jsdom": "^26.1.0",
     "tsx": "^4.23.15",
     "typescript": "^5",

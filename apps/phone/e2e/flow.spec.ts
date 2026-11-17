@@ -18,11 +18,20 @@ const mock = {
 test.describe.configure({ mode: "serial" });
 
 let page: Page;
+/** CSP violations seen by the page (event listener) or logged to the console, for the whole run. */
+const cspViolations: string[] = [];
 
 test.beforeAll(async ({ browser }) => {
   const context = await browser.newContext({ permissions: ["clipboard-read", "clipboard-write"] });
   page = await context.newPage();
+  page.on("console", (m) => {
+    if (/Content[- ]Security[- ]Policy/i.test(m.text())) cspViolations.push(`console: ${m.text()}`);
+  });
+  await page.exposeFunction("__cspViolation", (v: string) => cspViolations.push(v));
   await page.addInitScript(() => {
+    document.addEventListener("securitypolicyviolation", (e) =>
+      (window as unknown as { __cspViolation: (v: string) => void }).__cspViolation(`${e.violatedDirective} ${e.blockedURI}`),
+    );
     const w = window as unknown as { __vib: unknown[] };
     w.__vib = [];
     Object.defineProperty(navigator, "vibrate", { value: (p: unknown) => (w.__vib.push(p), true), configurable: true });
@@ -149,4 +158,57 @@ test("PWA: manifest and service worker", async ({ request }) => {
   expect(manifest.icons.map((i: { sizes: string }) => i.sizes)).toEqual(expect.arrayContaining(["192x192", "512x512"]));
   for (const i of manifest.icons) expect((await request.get(i.src)).headers()["content-type"]).toBe("image/png");
   await expect.poll(() => page.evaluate(async () => !!(await navigator.serviceWorker.getRegistration())?.active)).toBe(true);
+});
+
+test("CR-15: keys sealed in IndexedDB, nothing in localStorage", async () => {
+  const ls = await page.evaluate(() => JSON.stringify({ ...localStorage }));
+  expect(ls).not.toContain("k_pc_to_phone");
+  expect(ls).not.toContain("ssc.pairing.v1");
+  const rec = await page.evaluate(
+    () =>
+      new Promise<{ wrapExtractable: boolean; ivLen: number; ctLen: number; plain: boolean }>((resolve, reject) => {
+        const r = indexedDB.open("ssc-phone");
+        r.onerror = () => reject(r.error);
+        r.onsuccess = () => {
+          const store = r.result.transaction("kv").objectStore("kv");
+          const k = store.get("wrap-key.v1");
+          const p = store.get("pairing.v1");
+          p.onsuccess = () =>
+            resolve({
+              wrapExtractable: (k.result as CryptoKey).extractable,
+              ivLen: p.result.iv.byteLength,
+              ctLen: p.result.ct.byteLength,
+              plain: new TextDecoder().decode(p.result.ct).includes("k_pc_to_phone"),
+            });
+        };
+      }),
+  );
+  expect(rec).toMatchObject({ wrapExtractable: false, ivLen: 12, plain: false });
+  expect(rec.ctLen).toBeGreaterThan(100);
+});
+
+test("CR-15: strict CSP present and no violation during the whole flow", async ({ request }) => {
+  const csp = await page.locator('meta[http-equiv="Content-Security-Policy"]').getAttribute("content");
+  expect(csp).toContain("default-src 'self'");
+  expect(csp).toMatch(/script-src 'self' 'wasm-unsafe-eval'( 'sha256-[A-Za-z0-9+/=]+')+;/);
+  expect(csp).not.toContain("unsafe-inline");
+  expect(csp).not.toMatch(/'unsafe-eval'/); // only 'wasm-unsafe-eval' (libsodium's WebAssembly)
+  expect(csp).toContain("object-src 'none'");
+  expect(csp).toContain("base-uri 'none'");
+  expect(csp).toMatch(/connect-src 'self' wss:/);
+  // frame-ancestors and the other headers can't go in <meta>; they ship in _headers.
+  const headers = await (await request.get("/_headers")).text();
+  expect(headers).toContain("frame-ancestors 'none'");
+  expect(headers).toContain("X-Content-Type-Options: nosniff");
+  // Reload under the policy too (pairing restored from IndexedDB, reconnects).
+  await page.reload();
+  await expect(page.getByTestId("status")).toHaveText(/Connected · Wi-Fi/);
+  expect(cspViolations).toEqual([]);
+  // The detector is live: a cross-origin image is blocked and reported.
+  await page.evaluate(() => {
+    const img = document.createElement("img");
+    img.src = "https://example.invalid/x.png";
+    document.body.append(img);
+  });
+  await expect.poll(() => cspViolations.some((v) => v.startsWith("img-src"))).toBe(true);
 });

@@ -1,22 +1,23 @@
-// Pairing persistence + the live link. localStorage holds the direction keys (not the phone
-// private key, which is discarded after deriving them) and the seq state, scoped to the pairing
+// Pairing persistence + the live link. The pairing (direction keys; the phone private key is
+// discarded after deriving them) is sealed in IndexedDB under a non-extractable AES-GCM key
+// (./keystore, CR-15). localStorage holds only the non-secret seq state, scoped to the pairing
 // (contracts/crypto/README.md § Frames, seq scope).
 import { parseQr, PhoneLink, startPairing, type ChannelState, type LinkStatus, type Pairing, type WsLike } from "@ssc/protocol";
 import type { Copilot } from "./copilot";
+import { deleteSealedPairing, loadSealedPairing, saveSealedPairing } from "./keystore";
 
-const PAIRING_KEY = "ssc.pairing.v1";
 const LINK_KEY = "ssc.link.v1";
 /** Seq persistence is batched, so a crash can lose the last few sends. Jump ahead on restart
  * (README: "persist a reservation and jump to it"); gaps are fine, going backwards is not. */
 export const SEQ_RESERVATION = 1000;
 
 /** Saved link state as restored on startup: next-send seq jumps past anything possibly sent. */
-export function restoreLinkState(saved: { state: ChannelState; sessionId: string | null } | null) {
+export function restoreLinkState(saved: StoredLink | null) {
   if (!saved) return null;
   return { ...saved, state: { ...saved.state, nextSendSeq: saved.state.nextSendSeq + SEQ_RESERVATION } };
 }
 
-interface StoredPairing {
+export interface StoredPairing {
   pairing: Pairing;
   /** Present until the plaintext pair.hello has been sent (it is sent exactly once). */
   hello?: string;
@@ -25,6 +26,9 @@ interface StoredPairing {
 interface StoredLink {
   state: ChannelState;
   sessionId: string | null;
+  /** Written synchronously when pair.hello goes out, so a reload never re-sends it even if the
+   * async IndexedDB update that drops `hello` from the pairing did not land. */
+  helloSent?: boolean;
 }
 
 function read<T>(key: string): T | null {
@@ -43,13 +47,29 @@ function write(key: string, v: unknown): void {
   }
 }
 
-export function loadPairing(): StoredPairing | null {
-  return read<StoredPairing>(PAIRING_KEY);
+function savePairing(p: StoredPairing): void {
+  // Storage failure (IndexedDB blocked) only costs persistence: the link works for this page load.
+  saveSealedPairing(p).catch(() => undefined);
 }
 
-export function forgetPairing(): void {
-  localStorage.removeItem(PAIRING_KEY);
+/** Load the stored pairing (migrating a legacy localStorage entry once). null = not paired. */
+export async function loadPairing(): Promise<StoredPairing | null> {
+  let p: StoredPairing | null;
+  try {
+    p = await loadSealedPairing<StoredPairing>();
+  } catch {
+    return null;
+  }
+  if (p?.hello && read<StoredLink>(LINK_KEY)?.helloSent) {
+    delete p.hello;
+    savePairing(p);
+  }
+  return p;
+}
+
+export async function forgetPairing(): Promise<void> {
   localStorage.removeItem(LINK_KEY);
+  await deleteSealedPairing().catch(() => undefined);
 }
 
 /** Validate the QR text, derive keys, store the pending pairing (hello not yet sent). */
@@ -57,8 +77,8 @@ export async function pairFromQr(qrText: string, deviceName: string): Promise<St
   const qr = parseQr(qrText);
   const start = await startPairing(qr, deviceName);
   const stored: StoredPairing = { pairing: start.pairing, hello: start.hello, confirmed: false };
-  write(PAIRING_KEY, stored);
   localStorage.removeItem(LINK_KEY); // fresh keys -> fresh seq space
+  await saveSealedPairing(stored).catch(() => undefined);
   return stored;
 }
 
@@ -101,18 +121,18 @@ export function connect(
       // Any authentic frame from the PC proves it accepted our pair.hello (even across a reload).
       if (!stored.confirmed) {
         stored.confirmed = true;
-        write(PAIRING_KEY, stored);
+        savePairing(stored);
         hooks.onPaired();
       }
       copilot.handle(env);
     },
     onStatus: hooks.onStatus,
     onPersist: ({ state, sessionId, helloSent }) => {
-      pending = { state, sessionId };
+      pending = { state, sessionId, helloSent };
       if (helloSent && stored.hello) {
         delete stored.hello;
-        write(PAIRING_KEY, stored);
         write(LINK_KEY, pending); // the hello must never be re-sent: persist now, not later
+        savePairing(stored);
       }
       if (!flushScheduled) {
         flushScheduled = true;

@@ -1,9 +1,13 @@
-// Generates src/generated/{types,schemas}.ts from contracts/protocol (the source of truth).
+// Generates src/generated/{types,schemas,validators}.ts from contracts/protocol (the source of truth).
+// validators.ts is Ajv standalone code: the validators are compiled here, at build time, so the
+// PWA never calls `new Function` at runtime and its CSP needs no 'unsafe-eval' (CR-15).
 // Run: pnpm --filter @ssc/protocol generate. test/generated.test.ts fails if the output is stale.
 import { readFileSync, readdirSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { compile } from "json-schema-to-typescript";
+import Ajv2020 from "ajv/dist/2020.js";
+import standaloneCode from "ajv/dist/standalone/index.js";
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const PROTOCOL_DIR = resolve(here, "../../../contracts/protocol");
@@ -60,7 +64,46 @@ export async function generate(): Promise<Record<string, string>> {
   for (const m of messages) schemas += `  ${JSON.stringify(m.name)}: ${JSON.stringify(m.schema)},\n`;
   schemas += `};\n`;
 
-  return { "types.ts": types, "schemas.ts": schemas };
+  return { "types.ts": types, "schemas.ts": schemas, "validators.ts": validators(envelope, qr, messages) };
+}
+
+/** Same Ajv options as runtime validation used to have (validate.ts), compiled to standalone ESM. */
+export const AJV_OPTIONS = { strict: true, strictTypes: false, allErrors: false, validateFormats: false } as const;
+
+/** Export name for a schema in validators.ts: envelope, qr, or msg_<type with non-word chars as _>. */
+export function validatorName(name: string): string {
+  return name === "envelope" || name === "qr" ? name : `msg_${name.replace(/\W/g, "_")}`;
+}
+
+// ajv/dist/runtime/ucs2length is CommonJS; inline it so the generated module is plain ESM.
+const UCS2_REQUIRE = 'require("ajv/dist/runtime/ucs2length").default';
+const UCS2 = `function ucs2length(str) {
+  const len = str.length;
+  let length = 0, pos = 0, value;
+  while (pos < len) {
+    length++;
+    value = str.charCodeAt(pos++);
+    if (value >= 0xd800 && value <= 0xdbff && pos < len) {
+      value = str.charCodeAt(pos);
+      if ((value & 0xfc00) === 0xdc00) pos++;
+    }
+  }
+  return length;
+}
+`;
+
+function validators(envelope: SchemaFile, qr: SchemaFile, messages: SchemaFile[]): string {
+  const ajv = new Ajv2020({ ...AJV_OPTIONS, code: { source: true, esm: true } });
+  const exports: Record<string, string> = {};
+  for (const s of [envelope, qr, ...messages]) {
+    ajv.addSchema(s.schema);
+    exports[validatorName(s.name)] = String(s.schema.$id);
+  }
+  const fn = (standaloneCode as unknown as { default?: typeof standaloneCode }).default ?? standaloneCode;
+  let code = fn(ajv, exports).replace(/^"use strict";/, "");
+  code = code.split(UCS2_REQUIRE).join("ucs2length");
+  if (/\brequire\(/.test(code)) throw new Error("validators.ts: unexpected require() in Ajv standalone output");
+  return `${BANNER}// @ts-nocheck\n/* eslint-disable */\n${UCS2}${code}\n`;
 }
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {

@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { LinkStatus } from "@ssc/protocol";
 import { Copilot } from "../lib/copilot";
-import { connect, forgetPairing, loadPairing, pairFromQr, type LinkHandle } from "../lib/connection";
+import { connect, forgetPairing, loadPairing, pairFromQr, type LinkHandle, type StoredPairing } from "../lib/connection";
 import { browserVibrate } from "../lib/vibrate";
 import { AnswerCard } from "./AnswerCard";
 import { FollowUp } from "./FollowUp";
@@ -47,7 +47,7 @@ export function App() {
     [],
   );
   const state = useSyncExternalStore(copilot.subscribe, copilot.getState, copilot.getState);
-  const [stored, setStored] = useState<ReturnType<typeof loadPairing> | undefined>(undefined);
+  const [stored, setStored] = useState<StoredPairing | null | undefined>(undefined);
   const [status, setStatus] = useState<LinkStatus | null>(null);
   const [paired, setPaired] = useState(false);
   const [pairError, setPairError] = useState<string | null>(null);
@@ -55,10 +55,16 @@ export function App() {
   const [openAnswer, setOpenAnswer] = useState<string | null>(null);
 
   useEffect(() => {
-    const s = loadPairing();
-    setStored(s);
-    setPaired(!!s?.confirmed);
+    let live = true;
+    void loadPairing().then((s) => {
+      if (!live) return;
+      setStored(s);
+      setPaired(!!s?.confirmed);
+    });
     (window as unknown as { __ssc?: Copilot }).__ssc = copilot; // debug + E2E render timing
+    return () => {
+      live = false;
+    };
   }, [copilot]);
 
   useEffect(() => {
@@ -89,13 +95,13 @@ export function App() {
   const unpair = () => {
     linkRef.current?.stop();
     linkRef.current = null;
-    forgetPairing();
+    void forgetPairing();
     setStored(null);
     setPaired(false);
     setStatus(null);
   };
 
-  if (stored === undefined) return <main className="app" />; // first client render: localStorage not read yet
+  if (stored === undefined) return <main className="app" />; // first client render: pairing not loaded yet
   if (stored === null) {
     return (
       <main className="app">
