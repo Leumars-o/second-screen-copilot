@@ -70,6 +70,13 @@ pub struct TransportConfig {
     /// start (see [`ensure_lan_tls`]). It can also be switched on, renewed or off later through
     /// [`PcTransport::lan_tls_handle`]. `None` = plain `ws://`.
     pub lan_tls: Option<LanTls>,
+    /// CR-12: a LAN socket that has not delivered `pair.hello` or a valid sealed frame within
+    /// this long is closed (the phone speaks the moment it connects).
+    pub auth_deadline: Duration,
+    /// CR-12: web origins allowed to open the LAN socket. A request without `Origin` (native
+    /// client) is always allowed; a browser's is checked with [`origin_allowed`]. Entries are
+    /// `scheme://host[:port]`, or `https://*.example.com` for any subdomain of `example.com`.
+    pub allowed_origins: Vec<String>,
 }
 
 impl Default for TransportConfig {
@@ -85,6 +92,8 @@ impl Default for TransportConfig {
             batch_chars: 32,
             max_frame: 64 * 1024,
             lan_tls: None,
+            auth_deadline: Duration::from_secs(3),
+            allowed_origins: Vec::new(),
         }
     }
 }
@@ -94,9 +103,72 @@ impl TransportConfig {
         Self {
             lan_bind: SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), cfg.lan_port),
             relay_url: cfg.relay_url.clone(),
+            allowed_origins: pwa_origins(cfg),
             ..Default::default()
         }
     }
+}
+
+/// CR-12: origins the phone PWA may be served from. The PWA's domain is not in `Config` (frozen
+/// at contracts-v1.2), so it is derived:
+/// - `lan_domain` lives in the user's own Cloudflare zone (CR-4; never the apex, CR-13), so its
+///   parent domain and every subdomain of it are the user's: `relay.example.com` →
+///   `https://example.com`, `https://*.example.com`;
+/// - the relay host exactly (`https://<relay host>`); never its parent, which could be a shared
+///   hosting suffix such as `workers.dev`;
+/// - plus the comma-separated `$SSC_PWA_ORIGINS` for a PWA hosted elsewhere.
+///
+/// Without `lan_domain` the LAN is plain `ws://`, which an https page cannot open anyway.
+pub fn pwa_origins(cfg: &ssc_core::config::Config) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |o: String| {
+        if !out.contains(&o) {
+            out.push(o);
+        }
+    };
+    let clean = |h: &str| h.trim().trim_end_matches('.').to_ascii_lowercase();
+    let is_name = |h: &str| !h.is_empty() && h.parse::<IpAddr>().is_err() && !h.starts_with('[') && h.contains('.');
+    if let Some(d) = cfg.lan_domain.as_deref().map(clean).filter(|d| is_name(d)) {
+        let labels: Vec<&str> = d.split('.').collect();
+        let base = if labels.len() >= 3 { labels[1..].join(".") } else { d.clone() };
+        push(format!("https://{base}"));
+        push(format!("https://*.{base}"));
+    }
+    let relay_host = cfg.relay_url.as_deref().and_then(|u| u.split_once("://")).map(|(_, rest)| {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+        clean(authority.rsplit_once(':').map_or(authority, |(h, _)| h))
+    });
+    if let Some(h) = relay_host.filter(|h| is_name(h)) {
+        push(format!("https://{h}"));
+    }
+    if let Ok(extra) = std::env::var("SSC_PWA_ORIGINS") {
+        for o in extra.split(',').map(|o| o.trim().trim_end_matches('/').to_ascii_lowercase()) {
+            if !o.is_empty() {
+                push(o);
+            }
+        }
+    }
+    out
+}
+
+/// CR-12: is a browser `Origin` header value in `allowed` (see [`TransportConfig::allowed_origins`])?
+/// `null` and anything malformed are refused.
+pub fn origin_allowed(origin: &str, allowed: &[String]) -> bool {
+    let origin = origin.trim().trim_end_matches('/').to_ascii_lowercase();
+    let Some((scheme, host)) = origin.split_once("://") else { return false };
+    if host.is_empty() || host.contains(['/', '@']) {
+        return false;
+    }
+    allowed.iter().any(|a| {
+        let a = a.trim().trim_end_matches('/').to_ascii_lowercase();
+        match a.split_once("://") {
+            Some((s, pat)) if s == scheme => match pat.strip_prefix("*.") {
+                Some(base) => host.ends_with(&format!(".{base}")),
+                None => host == pat,
+            },
+            _ => false,
+        }
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -180,7 +252,11 @@ impl PcTransport {
             tls.acceptor.clone(),
             cmd_tx.clone(),
             ids.clone(),
-            cfg.max_frame,
+            ws::LanLimits {
+                max_frame: cfg.max_frame,
+                handshake: cfg.auth_deadline,
+                allowed_origins: Arc::new(cfg.allowed_origins.clone()),
+            },
             cancel.child_token(),
         ));
         if let Some(relay) = cfg.relay_url.clone() {

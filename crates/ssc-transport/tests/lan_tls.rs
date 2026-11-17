@@ -13,8 +13,10 @@ use ssc_core::protocol::{Command as Cmd, Message};
 use ssc_core::secrets::{MemorySecretStore, Secret, SecretKey, SecretStore};
 use ssc_core::traits::Transport;
 use ssc_crypto::Identity;
-use ssc_transport::lan_tls::cloudflare::{CloudflareDns, Upsert};
-use ssc_transport::lan_tls::{AcmeDirectory, LanTlsStage, Propagation, cert, ensure_lan_tls_with, normalize_domain};
+use ssc_transport::lan_tls::cloudflare::{CloudflareDns, MANAGED_MARKER, NOT_MANAGED, Upsert};
+use ssc_transport::lan_tls::{
+    AcmeDirectory, LanTlsStage, Propagation, cert, check_not_apex, ensure_lan_tls_with, normalize_domain,
+};
 use ssc_transport::{LanTls, LanTlsManager, LanTlsOptions, LanTlsStatus};
 use std::net::Ipv4Addr;
 use std::sync::{Arc, Mutex};
@@ -127,10 +129,94 @@ async fn a_record_create_noop_update_touches_nothing_else() {
 #[tokio::test]
 async fn proxied_record_is_switched_to_dns_only() {
     let env = Env::new(90).await;
-    env.cf().add(ZONE, "A", DOMAIN, "100.69.76.44", true);
+    env.cf().add_managed(ZONE, "A", DOMAIN, "100.69.76.44", true);
     let cf = CloudflareDns::with_base(Secret::new(TOKEN), &env.cf.api());
     assert_eq!(cf.upsert_a(ZONE, DOMAIN, "100.69.76.44".parse().unwrap(), 60).await.unwrap(), Upsert::Updated);
-    assert!(!env.cf().find("A", DOMAIN)[0].proxied);
+    let rec = &env.cf().find("A", DOMAIN)[0];
+    assert!(!rec.proxied);
+    assert_eq!(rec.comment.as_deref(), Some(MANAGED_MARKER), "marker kept across updates");
+}
+
+/// CR-13: created records carry the marker; later updates keep it.
+#[tokio::test]
+async fn created_records_are_marked_and_stay_marked() {
+    let env = Env::new(90).await;
+    let cf = CloudflareDns::with_base(Secret::new(TOKEN), &env.cf.api());
+    assert_eq!(cf.upsert_a(ZONE, DOMAIN, "10.0.0.1".parse().unwrap(), 60).await.unwrap(), Upsert::Created);
+    assert_eq!(cf.upsert_a(ZONE, DOMAIN, "10.0.0.2".parse().unwrap(), 60).await.unwrap(), Upsert::Updated);
+    let rec = &env.cf().find("A", DOMAIN)[0];
+    assert_eq!((rec.content.as_str(), rec.comment.as_deref()), ("10.0.0.2", Some(MANAGED_MARKER)));
+}
+
+/// CR-13: a record the user made by hand for us (DNS-only, already our LAN IP, no marker) is
+/// adopted: marked on the same update, content unchanged, the user's note kept after the marker.
+#[tokio::test]
+async fn unmarked_dns_only_record_with_our_ip_is_adopted() {
+    let env = Env::new(90).await;
+    let id = env.cf().add(ZONE, "A", DOMAIN, "100.69.76.44", false);
+    env.cf().records.last_mut().unwrap().comment = Some("phone LAN".into());
+    let cf = CloudflareDns::with_base(Secret::new(TOKEN), &env.cf.api());
+    assert_eq!(cf.upsert_a(ZONE, DOMAIN, "100.69.76.44".parse().unwrap(), 60).await.unwrap(), Upsert::Adopted);
+    let recs = env.cf().find("A", DOMAIN);
+    assert_eq!(recs.len(), 1);
+    assert_eq!((recs[0].id.as_str(), recs[0].content.as_str(), recs[0].proxied), (id.as_str(), "100.69.76.44", false));
+    assert_eq!(recs[0].comment.as_deref(), Some(format!("{MANAGED_MARKER} | phone LAN").as_str()));
+    // From now on it is ours: the IP watcher may re-point it.
+    assert_eq!(cf.upsert_a(ZONE, DOMAIN, "192.168.1.9".parse().unwrap(), 60).await.unwrap(), Upsert::Updated);
+    assert_eq!(env.cf().find("A", DOMAIN)[0].content, "192.168.1.9");
+
+    // Same through the full provisioning pass (what the app runs at start).
+    let env = Env::new(90).await;
+    env.cf().add(ZONE, "A", DOMAIN, "100.69.76.44", false);
+    let out = ensure_lan_tls_with(&cfg(), secrets().as_ref(), &env.opts()).await;
+    assert!(matches!(out.status, LanTlsStatus::Active { .. }), "{:?}", out.status);
+    assert!(env.cf().find("A", DOMAIN)[0].comment.as_deref().is_some_and(|c| c.starts_with(MANAGED_MARKER)));
+}
+
+/// CR-13: an unmarked record that points elsewhere, or is proxied, is refused untouched with a
+/// message the settings UI can show.
+#[tokio::test]
+async fn unmarked_records_we_cannot_adopt_are_refused_untouched() {
+    for (content, proxied) in [("203.0.113.20", false), ("100.69.76.44", true), ("203.0.113.20", true)] {
+        let env = Env::new(90).await;
+        env.cf().add(ZONE, "A", DOMAIN, content, proxied);
+        let snapshot = env.cf().records.clone();
+        let cf = CloudflareDns::with_base(Secret::new(TOKEN), &env.cf.api());
+        let e = cf.upsert_a(ZONE, DOMAIN, "100.69.76.44".parse().unwrap(), 60).await.unwrap_err();
+        assert_eq!(e.stage, LanTlsStage::Dns);
+        assert!(e.message.contains(NOT_MANAGED), "{e}");
+        assert_eq!(env.cf().records, snapshot, "{content} proxied={proxied}");
+
+        let out = ensure_lan_tls_with(&cfg(), secrets().as_ref(), &env.opts()).await;
+        match &out.status {
+            LanTlsStatus::Failed { stage: LanTlsStage::Dns, message } => assert!(message.contains(NOT_MANAGED)),
+            s => panic!("{s:?}"),
+        }
+        assert!(env.cf().writes().is_empty(), "no write at all: {:?}", env.cf().writes());
+        assert_eq!(env.acme.state.lock().unwrap().orders(), 0);
+    }
+}
+
+/// CR-13: `lan_domain` equal to the zone is refused before anything is written, whether the zone
+/// name comes from the lookup or (token without Zone:Read) is guessed from the label count.
+#[tokio::test]
+async fn zone_apex_is_refused() {
+    let env = Env::new(90).await;
+    let apex = Config { lan_domain: Some("example.com".into()), ..Default::default() };
+    let out = ensure_lan_tls_with(&apex, secrets().as_ref(), &env.opts()).await;
+    assert!(matches!(out.status, LanTlsStatus::Failed { stage: LanTlsStage::Config, .. }), "{:?}", out.status);
+
+    env.cf().zone_read = false;
+    let mut o = env.opts();
+    o.zone_id = Some(ZONE.into());
+    let out = ensure_lan_tls_with(&apex, secrets().as_ref(), &o).await;
+    assert!(matches!(out.status, LanTlsStatus::Failed { stage: LanTlsStage::Config, .. }), "{:?}", out.status);
+    assert!(env.cf().writes().is_empty());
+
+    assert!(check_not_apex("relay.example.com", Some("example.com")).is_ok());
+    assert!(check_not_apex("example.co.uk", Some("example.co.uk")).is_err());
+    assert!(check_not_apex("relay.example.com", None).is_ok());
+    assert!(check_not_apex("example.com", None).is_err());
 }
 
 #[tokio::test]

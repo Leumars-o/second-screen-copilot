@@ -473,7 +473,7 @@ fn secret_expose_sites_are_reviewed() {
         ("crates/ssc-crypto/src/keys.rs", 1),          // PC identity from keychain
         ("crates/ssc-crypto/src/pairing.rs", 1),       // paired device from keychain
         ("crates/ssc-pipeline/src/stt_select.rs", 1),  // emptiness check
-        ("crates/ssc-router/src/decision/mod.rs", 1),  // bearer auth (sensitive header)
+        ("crates/ssc-router/src/decision/mod.rs", 2),  // bearer auth; CR-10 scrub_key
         ("crates/ssc-router/src/factory.rs", 1),       // emptiness check
         ("crates/ssc-router/src/http.rs", 1),          // sensitive header value
         ("crates/ssc-router/src/providers/mod.rs", 1), // bearer auth (warm-up)

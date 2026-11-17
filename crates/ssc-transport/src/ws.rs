@@ -8,15 +8,21 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
-use tokio::sync::{Semaphore, mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
+use tokio_tungstenite::tungstenite::handshake::server::{ErrorResponse, Request, Response};
+use tokio_tungstenite::tungstenite::http::StatusCode;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
 use tokio_util::sync::CancellationToken;
 
 /// Max simultaneous LAN sockets (authenticated or not).
 const MAX_LAN_CONNS: usize = 8;
+/// Newcomers waiting for an evicted socket's slot (beyond this, connections are refused).
+const MAX_LAN_WAITERS: usize = 8;
+/// How long a newcomer waits for an evicted socket's slot.
+const EVICT_WAIT: Duration = Duration::from_secs(1);
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Per-socket outgoing queue.
 pub(crate) const CONN_QUEUE: usize = 1024;
@@ -71,15 +77,30 @@ pub(crate) async fn run_conn<S>(
     let _ = cmd_tx.send(Cmd::Closed { id }).await;
 }
 
+/// LAN server settings (CR-12).
+pub(crate) struct LanLimits {
+    pub max_frame: usize,
+    /// TLS + WebSocket upgrade deadline (the same short budget as authentication).
+    pub handshake: Duration,
+    pub allowed_origins: Arc<Vec<String>>,
+}
+
+/// LAN accept loop. CR-12: browsers from another origin are refused at the upgrade; when all
+/// slots are taken, the newcomer asks the core to evict the oldest not-yet-authenticated socket
+/// and waits briefly for its slot (the paired phone authenticates within one round trip, so idle
+/// squatters cannot lock it out); the core also closes sockets that stay unauthenticated past
+/// `auth_deadline`.
 pub(crate) async fn lan_server(
     listener: TcpListener,
     tls: Arc<RwLock<Option<TlsAcceptor>>>,
     cmd_tx: mpsc::Sender<Cmd>,
     ids: Arc<AtomicU64>,
-    max_frame: usize,
+    limits: LanLimits,
     cancel: CancellationToken,
 ) {
     let slots = Arc::new(Semaphore::new(MAX_LAN_CONNS));
+    let waiters = Arc::new(Semaphore::new(MAX_LAN_WAITERS));
+    let limits = Arc::new(limits);
     loop {
         let (tcp, _peer) = tokio::select! {
             _ = cancel.cancelled() => return,
@@ -88,22 +109,49 @@ pub(crate) async fn lan_server(
                 Err(_) => { tokio::time::sleep(Duration::from_millis(50)).await; continue; }
             },
         };
-        let Ok(permit) = slots.clone().try_acquire_owned() else {
-            drop(tcp); // full: refuse
-            continue;
+        let permit = match slots.clone().try_acquire_owned() {
+            Ok(p) => Slot::Ready(p),
+            Err(_) => match waiters.clone().try_acquire_owned() {
+                Ok(w) => Slot::Wait(w),
+                Err(_) => {
+                    drop(tcp); // full and already evicting for others: refuse
+                    continue;
+                }
+            },
         };
         let _ = tcp.set_nodelay(true);
-        let (cmd_tx, cancel) = (cmd_tx.clone(), cancel.child_token());
+        let (cmd_tx, cancel, slots, limits) = (cmd_tx.clone(), cancel.child_token(), slots.clone(), limits.clone());
         let id = ids.fetch_add(1, Ordering::Relaxed);
         // CR-4: plain or TLS is fixed per socket when it is accepted.
         let acceptor = tls.read().expect("lock").clone();
         tokio::spawn(async move {
-            let _permit = permit;
-            let cfg = Some(ws_config(max_frame));
+            let _permit = match permit {
+                Slot::Ready(p) => p,
+                Slot::Wait(_waiting) => {
+                    let _ = cmd_tx.send(Cmd::EvictUnauthed).await;
+                    match tokio::time::timeout(EVICT_WAIT, slots.acquire_owned()).await {
+                        Ok(Ok(p)) => p,
+                        _ => return,
+                    }
+                }
+            };
+            let cfg = Some(ws_config(limits.max_frame));
+            let allowed = limits.allowed_origins.clone();
+            // The callback signature (and its large `Err`) is tungstenite's `Callback` trait.
+            #[allow(clippy::result_large_err)]
+            let check_origin = move |req: &Request, resp: Response| match req.headers().get("origin") {
+                None => Ok(resp),
+                Some(o) if o.to_str().is_ok_and(|o| crate::origin_allowed(o, &allowed)) => Ok(resp),
+                Some(_) => {
+                    let mut e = ErrorResponse::new(Some("origin not allowed".into()));
+                    *e.status_mut() = StatusCode::FORBIDDEN;
+                    Err(e)
+                }
+            };
             match acceptor {
                 None => {
-                    let hs = tokio_tungstenite::accept_async_with_config(tcp, cfg);
-                    if let Ok(Ok(ws)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, hs).await {
+                    let hs = tokio_tungstenite::accept_hdr_async_with_config(tcp, check_origin, cfg);
+                    if let Ok(Ok(ws)) = tokio::time::timeout(limits.handshake, hs).await {
                         run_conn(ws, id, LinkPath::Lan, cmd_tx, cancel).await;
                     }
                 }
@@ -111,15 +159,21 @@ pub(crate) async fn lan_server(
                     // TLS and the WebSocket upgrade share one deadline.
                     let hs = async move {
                         let stream = acceptor.accept(tcp).await.ok()?;
-                        tokio_tungstenite::accept_async_with_config(stream, cfg).await.ok()
+                        tokio_tungstenite::accept_hdr_async_with_config(stream, check_origin, cfg).await.ok()
                     };
-                    if let Ok(Some(ws)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, hs).await {
+                    if let Ok(Some(ws)) = tokio::time::timeout(limits.handshake, hs).await {
                         run_conn(ws, id, LinkPath::Lan, cmd_tx, cancel).await;
                     }
                 }
             }
         });
     }
+}
+
+enum Slot {
+    Ready(OwnedSemaphorePermit),
+    /// No free slot: evict an unauthenticated socket and wait for its slot.
+    Wait(#[allow(dead_code)] OwnedSemaphorePermit),
 }
 
 /// Keep one outbound socket to `<relay>/r/<room>` for the current room, reconnecting with

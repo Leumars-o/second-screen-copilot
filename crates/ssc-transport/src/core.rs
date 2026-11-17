@@ -36,12 +36,30 @@ pub(crate) enum ConnOut {
 }
 
 pub(crate) enum Cmd {
-    Send { session_id: Option<Uuid>, message: Message },
-    BeginPairing { reply: oneshot::Sender<Result<QrPayload, String>> },
-    Device { reply: oneshot::Sender<Option<PairedDevice>> },
-    Opened { id: u64, path: LinkPath, tx: mpsc::Sender<ConnOut> },
-    Frame { id: u64, data: Vec<u8> },
-    Closed { id: u64 },
+    Send {
+        session_id: Option<Uuid>,
+        message: Message,
+    },
+    BeginPairing {
+        reply: oneshot::Sender<Result<QrPayload, String>>,
+    },
+    Device {
+        reply: oneshot::Sender<Option<PairedDevice>>,
+    },
+    Opened {
+        id: u64,
+        path: LinkPath,
+        tx: mpsc::Sender<ConnOut>,
+    },
+    Frame {
+        id: u64,
+        data: Vec<u8>,
+    },
+    Closed {
+        id: u64,
+    },
+    /// CR-12: the LAN server is full; close the oldest socket that has not authenticated.
+    EvictUnauthed,
 }
 
 struct Conn {
@@ -177,6 +195,17 @@ impl Core {
             Cmd::Frame { id, data } => self.on_frame(id, &data),
             Cmd::Closed { id } => {
                 self.conns.remove(&id);
+            }
+            Cmd::EvictUnauthed => {
+                let oldest = self
+                    .conns
+                    .iter()
+                    .filter(|(_, c)| c.path == LinkPath::Lan && c.last_rx.is_none())
+                    .min_by_key(|(id, c)| (c.opened, **id))
+                    .map(|(id, _)| *id);
+                if let Some(id) = oldest {
+                    self.close(id);
+                }
             }
         }
     }
@@ -322,6 +351,10 @@ impl Core {
             }
             Message::PairHello(_) => {} // only valid in plaintext
             _ => {
+                // CR-11: hand the advanced replay window to the keychain writer before the frame
+                // is delivered, so a crash cannot leave a window that accepts this frame again.
+                // Commands are rare; heartbeats (harmless to replay) keep the 1 s cadence.
+                self.persist(true);
                 if self.incoming_tx.try_send(env).is_err() {
                     self.dropped += 1;
                 }
@@ -334,10 +367,14 @@ impl Core {
         let dead = self.cfg.dead_after;
         // Dead-link detection: a phone silent for `dead_after` loses its socket (LAN) or its
         // "live" mark (relay: the socket is ours to the relay and stays open).
+        // CR-12: a LAN socket must authenticate (pair.hello or a valid sealed frame) within
+        // `auth_deadline`; LAN `last_rx` is only ever set by authentication.
+        let auth_deadline = self.cfg.auth_deadline;
         let mut to_close = vec![];
         for (id, c) in self.conns.iter_mut() {
             let silent_for = now.duration_since(c.last_rx.unwrap_or(c.opened));
-            if silent_for > dead {
+            let unauthed_lan = c.path == LinkPath::Lan && c.last_rx.is_none();
+            if silent_for > dead || (unauthed_lan && silent_for > auth_deadline) {
                 match c.path {
                     LinkPath::Lan => to_close.push(*id),
                     LinkPath::Relay => c.last_rx = None,
@@ -410,13 +447,19 @@ impl Core {
     /// seq block was reserved (must be persisted promptly), or at most once a second when only
     /// the replay window moved.
     fn maybe_persist(&mut self) {
+        self.persist(false);
+    }
+
+    /// `recv_now`: also hand over a moved replay window immediately (CR-11). If the writer's
+    /// queue is full the record stays pending and is retried after the next command.
+    fn persist(&mut self, recv_now: bool) {
         let Some(ch) = self.channel.as_mut() else { return };
         if ch.take_persist() {
             self.persist_pending = true;
         }
         let counters = ch.counters();
         let recv_moved = counters.last_recv != self.persisted_recv
-            && self.last_persist.elapsed() >= std::time::Duration::from_secs(1);
+            && (recv_now || self.last_persist.elapsed() >= std::time::Duration::from_secs(1));
         if !(self.persist_pending || recv_moved) {
             return;
         }
@@ -426,6 +469,8 @@ impl Core {
             self.persist_pending = false;
             self.persisted_recv = counters.last_recv;
             self.last_persist = Instant::now();
+        } else if recv_now {
+            self.persist_pending = true;
         }
     }
 

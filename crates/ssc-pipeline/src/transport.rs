@@ -90,6 +90,10 @@ pub struct PhoneLink {
 /// server to `wss://<lan_domain>:<lan_port>`; until then (or if it fails) the LAN stays `ws://`
 /// with the relay as fallback. Pairing QR codes should be issued once the status is `Active` or
 /// `Failed` so they carry the right URL ([`wait_lan_tls_settled`]).
+///
+/// CR-14: in local-only mode the manager makes no Cloudflare or Let's Encrypt call; it serves a
+/// still-valid cached certificate, else the LAN stays `ws://`. Saving settings restarts the
+/// system, so a mode change takes effect here.
 pub async fn start_transport(cfg: &Config, secrets: Arc<dyn SecretStore>, clock: Arc<dyn Clock>) -> Result<PhoneLink> {
     let transport = start_transport_with(transport_config(cfg), secrets.clone(), clock, data_dir()).await?;
     let lan_tls = LanTlsManager::spawn(cfg, secrets, LanTlsOptions::default(), transport.lan_tls_handle());

@@ -18,6 +18,7 @@ use rcgen::{
 use rustls_pki_types::CertificateSigningRequestDer;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
+use ssc_transport::lan_tls::cloudflare::MANAGED_MARKER;
 use std::convert::Infallible;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -38,6 +39,7 @@ pub struct Rec {
     pub content: String,
     pub proxied: bool,
     pub ttl: u64,
+    pub comment: Option<String>,
 }
 
 #[derive(Default)]
@@ -66,7 +68,14 @@ impl CfState {
             content: content.into(),
             proxied,
             ttl: 300,
+            comment: None,
         });
+        id
+    }
+    /// A record the agent created earlier (carries the CR-13 marker).
+    pub fn add_managed(&mut self, zone: &str, kind: &str, name: &str, content: &str, proxied: bool) -> String {
+        let id = self.add(zone, kind, name, content, proxied);
+        self.records.last_mut().unwrap().comment = Some(MANAGED_MARKER.into());
         id
     }
     pub fn find(&self, kind: &str, name: &str) -> Vec<Rec> {
@@ -140,7 +149,7 @@ fn cf_fail(status: StatusCode, code: i64, msg: &str) -> Response<Full<Bytes>> {
 }
 
 fn rec_json(r: &Rec) -> Value {
-    json!({"id": r.id, "type": r.kind, "name": r.name, "content": r.content, "proxied": r.proxied, "ttl": r.ttl})
+    json!({"id": r.id, "type": r.kind, "name": r.name, "content": r.content, "proxied": r.proxied, "ttl": r.ttl, "comment": r.comment})
 }
 
 async fn cf_handle(req: Request<hyper::body::Incoming>, st: &Mutex<CfState>) -> Response<Full<Bytes>> {
@@ -175,6 +184,15 @@ async fn cf_handle(req: Request<hyper::body::Incoming>, st: &Mutex<CfState>) -> 
                 s.zones.iter().filter(|(_, n)| n == name).map(|(id, n)| json!({"id": id, "name": n})).collect();
             ok(json!(zs))
         }
+        ("GET", ["zones", id]) => {
+            if !s.zone_read {
+                return cf_fail(StatusCode::FORBIDDEN, 10000, "Authentication error");
+            }
+            match s.zones.iter().find(|(z, _)| z == id) {
+                Some((z, n)) => ok(json!({"id": z, "name": n})),
+                None => cf_fail(StatusCode::NOT_FOUND, 7003, "Could not route"),
+            }
+        }
         ("GET", ["zones", zone, "dns_records"]) => {
             let (kind, name) = (q(&qs, "type"), q(&qs, "name"));
             let rs: Vec<Value> = s
@@ -198,6 +216,7 @@ async fn cf_handle(req: Request<hyper::body::Incoming>, st: &Mutex<CfState>) -> 
             );
             let r = s.records.iter_mut().find(|r| r.id == id).unwrap();
             r.ttl = b["ttl"].as_u64().unwrap();
+            r.comment = b["comment"].as_str().map(str::to_string);
             ok(rec_json(r))
         }
         ("PUT", ["zones", zone, "dns_records", id]) => {
@@ -210,6 +229,8 @@ async fn cf_handle(req: Request<hyper::body::Incoming>, st: &Mutex<CfState>) -> 
             r.content = b["content"].as_str().unwrap().into();
             r.proxied = b["proxied"].as_bool().expect("proxied must be sent explicitly");
             r.ttl = b["ttl"].as_u64().unwrap();
+            // A PUT replaces the record: a missing comment clears it, as on Cloudflare.
+            r.comment = b["comment"].as_str().map(str::to_string);
             ok(rec_json(r))
         }
         ("DELETE", ["zones", zone, "dns_records", id]) => {

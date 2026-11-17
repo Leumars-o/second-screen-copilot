@@ -23,6 +23,7 @@ use crate::detect_lan_ipv4;
 use cloudflare::CloudflareDns;
 use serde::Serialize;
 use ssc_core::config::Config;
+use ssc_core::protocol::Mode;
 use ssc_core::secrets::{SecretKey, SecretStore};
 use std::fmt;
 use std::net::Ipv4Addr;
@@ -169,6 +170,22 @@ pub fn normalize_domain(d: &str) -> Result<String, LanTlsError> {
     Ok(d)
 }
 
+/// CR-13: `lan_domain` must not be the zone apex (that is the user's website). With the zone name
+/// unknown (token without Zone:Read), a two-label name is treated as an apex.
+pub fn check_not_apex(domain: &str, zone_name: Option<&str>) -> Result<(), LanTlsError> {
+    let apex = match zone_name {
+        Some(z) => domain.eq_ignore_ascii_case(z.trim_end_matches('.')),
+        None => domain.split('.').count() < 3,
+    };
+    if apex {
+        return Err(LanTlsError::new(
+            LanTlsStage::Config,
+            format!("lan_domain {domain:?} is the zone apex; use a subdomain such as relay.{domain}"),
+        ));
+    }
+    Ok(())
+}
+
 fn now_unix() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
 }
@@ -212,6 +229,19 @@ pub async fn ensure_lan_tls_with(cfg: &Config, secrets: &dyn SecretStore, opts: 
             None
         }
     };
+
+    // CR-14: local-only mode promises nothing leaves the PC but encrypted phone frames, so no
+    // Cloudflare (it would publish the LAN IP) and no ACME. A still-valid cached certificate is
+    // served; without one the LAN stays plain `ws://` (the https PWA then uses the relay).
+    if cfg.mode == Mode::Local {
+        let note = "local-only mode: DNS record and certificate upkeep paused (no Cloudflare or Let's Encrypt calls)";
+        return match cached {
+            Some(c) => {
+                Ensured { status: active(&c, None, Some(note.into())), tls: Some(c), published_ip: None, zone: None }
+            }
+            None => failed(LanTlsError::new(LanTlsStage::Config, note), None),
+        };
+    }
     let fallback = |e: LanTlsError, cached: Option<LanTls>, ip: Option<Ipv4Addr>, zone: Option<String>| {
         tracing::warn!(error = %e, "lan_tls: provisioning failed");
         match cached {
@@ -234,13 +264,17 @@ pub async fn ensure_lan_tls_with(cfg: &Config, secrets: &dyn SecretStore, opts: 
         return fallback(LanTlsError::new(LanTlsStage::Dns, "no LAN IPv4 address"), cached, None, None);
     };
     let cf = CloudflareDns::with_base(token, &opts.cloudflare_api);
-    let zone = match &opts.zone_id {
-        Some(z) => z.clone(),
-        None => match cf.find_zone(&domain).await {
-            Ok(z) => z,
+    let (zone, zone_name) = match &opts.zone_id {
+        // Without Zone:Read the name stays unknown; `check_not_apex` then falls back to a heuristic.
+        Some(z) => (z.clone(), cf.zone_name(z).await.ok()),
+        None => match cf.find_zone_named(&domain).await {
+            Ok(z) => (z.id, Some(z.name)),
             Err(e) => return fallback(e, cached, None, None),
         },
     };
+    if let Err(e) = check_not_apex(&domain, zone_name.as_deref()) {
+        return fallback(e, cached, None, Some(zone));
+    }
     match cf.upsert_a(&zone, &domain, ip, opts.record_ttl).await {
         Ok(u) => tracing::info!(?u, %ip, "lan_tls: A record {domain}"),
         Err(e) => return fallback(e, cached, None, Some(zone)),
@@ -398,6 +432,9 @@ async fn manage(
             LanTlsStatus::Off | LanTlsStatus::Starting => opts.recheck,
         };
         tx.send_replace(status);
+        if cfg.mode == Mode::Local {
+            return; // CR-14: nothing to keep up without network calls
+        }
         let deadline = tokio::time::Instant::now() + next;
 
         // IP watch until the next full pass. Needs the zone and a published IP.

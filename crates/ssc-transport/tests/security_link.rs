@@ -288,7 +288,6 @@ async fn wire_replay_and_tamper_are_not_delivered() {
 /// CR-11: the replay window is persisted at most once a second, so after a crash the PC restarts
 /// with a stale window and accepts a recorded phone frame (e.g. `memory.delete`) a second time.
 #[tokio::test]
-#[ignore = "CR-11"]
 async fn replay_window_is_persisted_before_frames_are_delivered() {
     let (pc, _phone, dev) = prepaired();
     let pc_secret = pc.to_secret();
@@ -324,7 +323,6 @@ async fn replay_window_is_persisted_before_frames_are_delivered() {
 /// CR-12: unauthenticated LAN sockets hold one of 8 slots until `dead_after` (15 s). Anyone on
 /// the Wi-Fi can keep all 8 busy and lock the paired phone out of the LAN path.
 #[tokio::test]
-#[ignore = "CR-12"]
 async fn idle_unauthenticated_sockets_cannot_lock_out_the_phone() {
     let (pc, _phone, dev) = prepaired();
     let cfg = TransportConfig { dead_after: Duration::from_secs(15), ..test_config() };
@@ -353,7 +351,6 @@ async fn idle_unauthenticated_sockets_cannot_lock_out_the_phone() {
 /// subject to CORS, so any page open in a browser on the PC or the Wi-Fi can connect to
 /// `ws(s)://<lan>:47823` and hold the slots above (no LAN foothold needed, just a visited page).
 #[tokio::test]
-#[ignore = "CR-12"]
 async fn cross_origin_browser_upgrades_are_refused() {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     let (pc, _phone, dev) = prepaired();
@@ -362,6 +359,112 @@ async fn cross_origin_browser_upgrades_are_refused() {
     req.headers_mut().insert("origin", "https://evil.example".parse().unwrap());
     let r = tokio::time::timeout(T, tokio_tungstenite::connect_async(req)).await.unwrap();
     assert!(r.is_err(), "upgrade from https://evil.example accepted");
+}
+
+/// CR-12: a LAN socket that never authenticates is closed after `auth_deadline`, without waiting
+/// for `dead_after`.
+#[tokio::test]
+async fn unauthenticated_lan_socket_is_closed_after_the_auth_deadline() {
+    let (pc, _phone, dev) = prepaired();
+    let cfg = TransportConfig { auth_deadline: Duration::from_millis(300), ..test_config() };
+    let t = start(cfg, pc, Some(dev.clone())).await;
+    let mut idle = FakePhone::from_device(&dev);
+    idle.lan = Some(ws_connect(&t.lan_url()).await);
+    assert!(idle.closed_within(P::Lan, Duration::from_secs(2)).await, "idle socket still open");
+
+    // An authenticated socket outlives the deadline.
+    let mut ph = FakePhone::from_device(&dev);
+    ph.lan = Some(ws_connect(&t.lan_url()).await);
+    let mut incoming = t.take_incoming().unwrap();
+    ph.send(P::Lan, None, Message::Command(Cmd::Pin { answer_id: Uuid::new_v4() })).await;
+    tokio::time::timeout(T, incoming.recv()).await.unwrap().unwrap();
+    tokio::time::sleep(Duration::from_millis(700)).await;
+    let e = ph.send(P::Lan, None, Message::Command(Cmd::Pin { answer_id: Uuid::new_v4() })).await;
+    assert_eq!(tokio::time::timeout(T, incoming.recv()).await.unwrap().unwrap(), e);
+}
+
+/// CR-12: when the slots are full, newcomers evict unauthenticated sockets, never the phone's.
+#[tokio::test]
+async fn eviction_spares_the_authenticated_phone() {
+    let (pc, _phone, dev) = prepaired();
+    let t = start(test_config(), pc, Some(dev.clone())).await;
+    let mut incoming = t.take_incoming().unwrap();
+    let mut ph = FakePhone::from_device(&dev);
+    ph.lan = Some(ws_connect(&t.lan_url()).await);
+    ph.send(P::Lan, None, Message::Command(Cmd::Pin { answer_id: Uuid::new_v4() })).await;
+    tokio::time::timeout(T, incoming.recv()).await.unwrap().unwrap();
+    let mut squatters = Vec::new();
+    for _ in 0..20 {
+        if let Ok(Ok((ws, _))) =
+            tokio::time::timeout(Duration::from_secs(2), tokio_tungstenite::connect_async(t.lan_url())).await
+        {
+            squatters.push(ws);
+        }
+    }
+    let e = ph.send(P::Lan, None, Message::Command(Cmd::Pin { answer_id: Uuid::new_v4() })).await;
+    assert_eq!(tokio::time::timeout(T, incoming.recv()).await.unwrap().unwrap(), e, "phone socket evicted");
+    drop(squatters);
+}
+
+/// CR-12: the PWA's own origin (configured), and native clients (no `Origin`), are accepted.
+#[tokio::test]
+async fn allowed_origin_and_native_clients_are_accepted() {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let (pc, _phone, dev) = prepaired();
+    let cfg = TransportConfig { allowed_origins: vec!["https://*.example.com".into()], ..test_config() };
+    let t = start(cfg, pc, Some(dev)).await;
+    for (origin, ok) in [
+        (Some("https://app.example.com"), true),
+        (None, true),
+        (Some("https://example.com.evil.test"), false),
+        (Some("http://app.example.com"), false),
+        (Some("null"), false),
+    ] {
+        let mut req = t.lan_url().into_client_request().unwrap();
+        if let Some(o) = origin {
+            req.headers_mut().insert("origin", o.parse().unwrap());
+        }
+        let r = tokio::time::timeout(T, tokio_tungstenite::connect_async(req)).await.unwrap();
+        assert_eq!(r.is_ok(), ok, "{origin:?}");
+    }
+}
+
+#[test]
+fn pwa_origins_and_origin_matching() {
+    use ssc_transport::{origin_allowed, pwa_origins};
+    let cfg = Config {
+        relay_url: Some("wss://relay.live-preview.space/".into()),
+        lan_domain: Some("lan.live-preview.space".into()),
+        ..Default::default()
+    };
+    let o = pwa_origins(&cfg);
+    assert!(
+        o.contains(&"https://live-preview.space".to_string())
+            && o.contains(&"https://*.live-preview.space".to_string())
+    );
+    for (origin, ok) in [
+        ("https://live-preview.space", true),
+        ("https://app.live-preview.space", true),
+        ("HTTPS://App.Live-Preview.Space/", true),
+        ("https://evil-live-preview.space", false),
+        ("https://live-preview.space.evil.test", false),
+        ("http://live-preview.space", false),
+        ("https://app.live-preview.space:8443", false),
+        ("null", false),
+        ("", false),
+    ] {
+        assert_eq!(origin_allowed(origin, &o), ok, "{origin}");
+    }
+    // The relay host is allowed exactly, never its parent (could be a shared suffix).
+    let cfg = Config { relay_url: Some("wss://foo.workers.dev:8443/x".into()), ..Default::default() };
+    let o = pwa_origins(&cfg);
+    assert!(o.contains(&"https://foo.workers.dev".to_string()), "{o:?}");
+    assert!(!origin_allowed("https://evil.workers.dev", &o));
+    // A two-label lan_domain is its own base (never a bare TLD); IP relays add nothing.
+    let cfg = Config { lan_domain: Some("example.com".into()), ..Default::default() };
+    assert_eq!(pwa_origins(&cfg)[..2], ["https://example.com".to_string(), "https://*.example.com".to_string()]);
+    let cfg = Config { relay_url: Some("ws://127.0.0.1:9000".into()), ..Default::default() };
+    assert!(pwa_origins(&cfg).iter().all(|o| !o.contains("127.0.0.1")));
 }
 
 // ------------------------------------------------------------------ Cloudflare client
@@ -409,7 +512,7 @@ async fn lax_api_cannot_widen_cloudflare_writes() {
         {"id":"apex","type":"A","name":"example.com","content":"203.0.113.10","proxied":true,"ttl":1},
         {"id":"www","type":"A","name":"www.example.com","content":"203.0.113.11","proxied":true,"ttl":1},
         {"id":"mx","type":"MX","name":"example.com","content":"mail.example.com","ttl":300},
-        {"id":"ours","type":"A","name":"relay.example.com","content":"10.0.0.9","proxied":false,"ttl":60},
+        {"id":"ours","type":"A","name":"relay.example.com","content":"10.0.0.9","proxied":false,"ttl":60,"comment":"managed-by: second-screen-copilot"},
         {"id":"chal-other","type":"TXT","name":"_acme-challenge.www.example.com","content":"\"x\"","ttl":60}]}"#;
     let one = r#"{"success":true,"errors":[],"result":{"id":"ours","type":"A","name":"relay.example.com","content":"10.0.0.7","proxied":false,"ttl":60}}"#;
     let (base, log) =
@@ -498,7 +601,6 @@ async fn settle(m: &LanTlsManager) -> LanTlsStatus {
 /// zone apex or a record the user made for something else. A typo in `lan_domain` (or setting it
 /// to the bare zone) would silently point the user's website at a private LAN IP.
 #[tokio::test]
-#[ignore = "CR-13"]
 async fn refuses_to_repoint_records_it_does_not_own() {
     for (domain, existing) in [("example.com", "203.0.113.10"), (DOMAIN, "203.0.113.20")] {
         let mut st =
@@ -520,7 +622,6 @@ async fn refuses_to_repoint_records_it_does_not_own() {
 /// CR-14: local-only mode promises that nothing but encrypted phone frames leaves the PC, yet the
 /// LAN TLS manager still calls the Cloudflare API (publishing the LAN IP) and the ACME CA.
 #[tokio::test]
-#[ignore = "CR-14"]
 async fn local_only_mode_makes_no_cloudflare_or_acme_calls() {
     let cf = FakeCloudflare::start(CfState {
         zones: vec![(ZONE.into(), "example.com".into())],

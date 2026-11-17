@@ -273,7 +273,6 @@ async fn answer_adapter_errors_never_contain_the_key() {
 /// CR-10: the systemone (Jev) adapter appends the provider's `detail.message` to its error; a
 /// provider that echoes the key (or the redaction-free question) puts it in logs and the UI.
 #[tokio::test]
-#[ignore = "CR-10"]
 async fn decision_adapter_errors_never_contain_the_key() {
     for status in [401u16, 400, 403, 500] {
         let srv = serve(vec![Reply::status(status, &echo_body())]).await;

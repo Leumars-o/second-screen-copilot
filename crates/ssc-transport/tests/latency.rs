@@ -53,6 +53,10 @@ async fn loopback_round_trip_p95_under_20ms() {
     let (pc, _phone, dev) = prepaired();
     let t = start(test_config(), pc, Some(dev.clone())).await;
     let mut incoming = t.take_incoming().unwrap();
+    // Drain device records like the pipeline's keychain writer does (CR-11 hands one over per
+    // command), so the measurement includes that cost.
+    let mut updates = t.take_device_updates().unwrap();
+    tokio::spawn(async move { while updates.recv().await.is_some() {} });
     let mut ph = FakePhone::from_device(&dev);
     ph.lan = Some(ws_connect(&t.lan_url()).await);
 

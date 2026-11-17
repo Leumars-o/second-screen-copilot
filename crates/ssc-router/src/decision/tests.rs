@@ -205,3 +205,13 @@ async fn local_only_has_no_cloud_decision_model() {
     assert!(!r.decisions_gate_answers());
     assert!(!r.has_cloud());
 }
+
+#[test]
+fn scrub_key_removes_whole_and_partial_keys_and_keeps_the_rest() {
+    let key = Some("sk-PLANTED-0123456789abcdef");
+    assert_eq!(super::scrub_key("Unknown model: jev-1.14", key), "Unknown model: jev-1.14");
+    assert_eq!(super::scrub_key("bad key sk-PLANTED-0123456789abcdef here", key), "bad key [redacted] here");
+    assert_eq!(super::scrub_key("key sk-PLANT***89abcdef. retry", key), "key [redacted] retry");
+    assert_eq!(super::scrub_key("x sk-PLANTED…", key), "x [redacted]");
+    assert_eq!(super::scrub_key("as is", None), "as is");
+}

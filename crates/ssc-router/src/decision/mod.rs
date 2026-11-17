@@ -72,7 +72,8 @@ impl DecisionModel for SystemOneDecision {
         let headers = resp.headers().clone();
         let bytes = resp.bytes().await.map_err(|e| map_reqwest(e, ms()))?;
         if !status.is_success() {
-            return Err(with_detail(map_status(status, &headers, &bytes, ms()), &bytes));
+            let key = self.key.as_ref().map(|k| k.expose());
+            return Err(with_detail(map_status(status, &headers, &bytes, ms()), status, &bytes, key));
         }
         let v: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| SscError::Invalid("systemone response: not JSON".into()))?;
@@ -85,15 +86,36 @@ impl DecisionModel for SystemOneDecision {
 const DETAIL_MAX_CHARS: usize = 160;
 
 /// Append the provider's `detail.message` (e.g. "Unknown model: jev-1.14") so a failing call is
-/// diagnosable. Safe here, unlike in answer adapters: systemone errors describe the request shape,
-/// the body never contains our key, and the input was already redacted before a cloud call.
-fn with_detail(e: SscError, body: &[u8]) -> SscError {
+/// diagnosable. CR-10: never for 401/403 (auth errors tend to echo the key), and anything that
+/// looks like our key (the whole key, or a word sharing its first or last 8 characters, as in
+/// "sk-PLAN…cdef") is replaced by `[redacted]`. The input was already redacted before a cloud call.
+fn with_detail(e: SscError, status: reqwest::StatusCode, body: &[u8], key: Option<&str>) -> SscError {
+    if matches!(status.as_u16(), 401 | 403) {
+        return e;
+    }
     let Some(msg) = crate::http::error_message(body, DETAIL_MAX_CHARS) else { return e };
+    let msg = scrub_key(&msg, key);
     match e {
         SscError::Invalid(s) => SscError::Invalid(format!("systemone {s}: {msg}")),
         SscError::Unavailable(s) => SscError::Unavailable(format!("systemone {s}: {msg}")),
         other => other,
     }
+}
+
+/// Replace the key, and any word that shares its first or last 8 characters, with `[redacted]`.
+fn scrub_key(msg: &str, key: Option<&str>) -> String {
+    let Some(key) = key.map(str::trim).filter(|k| !k.is_empty()) else { return msg.to_string() };
+    let msg = msg.replace(key, "[redacted]");
+    let chars: Vec<char> = key.chars().collect();
+    if chars.len() < 12 {
+        return msg; // too short for partial matching to mean anything
+    }
+    let head: String = chars[..8].iter().collect();
+    let tail: String = chars[chars.len() - 8..].iter().collect();
+    msg.split(' ')
+        .map(|w| if w.contains(&head) || w.contains(&tail) { "[redacted]" } else { w })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// "Is the cloud decision endpoint reachable again?"
