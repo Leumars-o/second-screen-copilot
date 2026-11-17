@@ -3,13 +3,17 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Wave 0 placeholder. Owner: W1-RELAY (see Build Sheet).",
+  "description": "Blind relay: Cloudflare Worker + one Durable Object per room. Owner: W1-RELAY.",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "test": "vitest run --passWithNoTests"
+    "test": "vitest run",
+    "dev": "wrangler dev"
   },
   "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.23.0",
+    "@cloudflare/workers-types": "^5.20261116.1",
     "typescript": "^5",
-    "vitest": "^3"
+    "vitest": "^4.1.12",
+    "wrangler": "^4.163.0"
   }
 }
