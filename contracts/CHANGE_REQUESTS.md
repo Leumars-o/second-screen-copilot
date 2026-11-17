@@ -66,3 +66,8 @@ Format:
 - What: `Config.lan_domain: Option<String>` (the DNS-only host, e.g. `relay.live-preview.space`); `SecretKey::Cloudflare` (`api.cloudflare`, Zone→DNS→Edit token), `SecretKey::AcmeAccount` (`device.acme_account`), `SecretKey::LanTlsKey` (`device.lan_tls_key`).
 - Why: W2-INTEGRATE needs somewhere to read the domain and keep the ACME account key and certificate private key out of plain files.
 - Status: accepted (contracts-v1.2)
+
+## CR-7 — Correct Jev defaults
+- From: lead (live call, 2026-11-17)
+- What: `models.decision_cloud_base_url` default `https://api.typesafe.ai`; `models.decision_cloud_model` default `jev-1.14.0` (the API rejects `jev-1.14` with `Unknown model`; `jev-latest` resolves to `jev-1.14.0`). Live response matched the documented shape: `{model, answers: {id: {type:"noul", noul} | {type:"choice", choice, confidence, probabilities}}, usage}`; 0.56 s round trip.
+- Status: accepted (contracts-v1.3)

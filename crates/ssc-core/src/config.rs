@@ -53,7 +53,7 @@ pub struct Models {
     pub ollama_url: String,
     pub local_answer_model: String,
     pub local_postcall_model: String,
-    /// TypeSafe /v1/systemone base URL. Empty until confirmed (Build Sheet §9).
+    /// TypeSafe /v1/systemone base URL (direct host; gateways also work). Empty disables Jev.
     pub decision_cloud_base_url: String,
     pub decision_cloud_model: String,
     pub decision_local_model: String,
@@ -134,8 +134,9 @@ impl Default for Models {
             ollama_url: "http://127.0.0.1:11434".into(),
             local_answer_model: "gemma4:e2b".into(),   // verify
             local_postcall_model: "gemma4:12b".into(), // verify
-            decision_cloud_base_url: String::new(),
-            decision_cloud_model: "jev-1.14".into(), // verify
+            // Verified live 2026-11-17: `jev-1.14` is rejected; `jev-latest` resolves to `jev-1.14.0`.
+            decision_cloud_base_url: "https://api.typesafe.ai".into(),
+            decision_cloud_model: "jev-1.14.0".into(),
             decision_local_model: "tev1:4b".into(),  // verify
             gemini_tier: GeminiTier::Paid,
             strong_base_url: None,
