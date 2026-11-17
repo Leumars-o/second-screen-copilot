@@ -26,6 +26,13 @@ pub struct Config {
     pub decision_confidence_threshold: f64,
     /// Lines changed in a screen diff that count as a "big screen change" trigger.
     pub big_screen_change_lines: usize,
+    /// Test builds only: allows the Gemini free tier (CR-5).
+    pub testing: bool,
+    /// Also mask emails when redaction is on (CR-5).
+    pub redact_emails: bool,
+    /// CR-4/CR-6: public host name whose DNS-only A record points at this PC's LAN IP, served as
+    /// `wss://<lan_domain>:<lan_port>` with a Let's Encrypt certificate. None = self-signed / plain LAN.
+    pub lan_domain: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -50,6 +57,18 @@ pub struct Models {
     pub decision_cloud_base_url: String,
     pub decision_cloud_model: String,
     pub decision_local_model: String,
+    /// Declared tier of the Gemini key. `free` is refused unless `testing` (CR-5).
+    pub gemini_tier: GeminiTier,
+    /// Base URL for a strong model whose provider isn't `anthropic`, `openai` or `groq` (CR-5).
+    pub strong_base_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum GeminiTier {
+    #[default]
+    Paid,
+    Free,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,6 +108,9 @@ impl Default for Config {
             groq_budget: GroqBudget::default(),
             decision_confidence_threshold: 0.6,
             big_screen_change_lines: 15,
+            testing: false,
+            redact_emails: false,
+            lan_domain: None,
         }
     }
 }
@@ -115,6 +137,8 @@ impl Default for Models {
             decision_cloud_base_url: String::new(),
             decision_cloud_model: "jev-1.14".into(), // verify
             decision_local_model: "tev1:4b".into(),  // verify
+            gemini_tier: GeminiTier::Paid,
+            strong_base_url: None,
         }
     }
 }
@@ -183,6 +207,20 @@ mod tests {
         assert_eq!(c.timeouts.decision_failover_after, 2);
         assert_eq!(c.timeouts.first_token_ms, 1000);
         assert!(!c.keep_transcripts);
+        assert_eq!(c.models.gemini_tier, GeminiTier::Paid);
+        assert!(!c.testing && !c.redact_emails && c.lan_domain.is_none());
+    }
+
+    #[test]
+    fn cr5_cr6_fields_parse() {
+        let c: Config = toml::from_str(
+            "testing = true\nredact_emails = true\nlan_domain = \"relay.example.com\"\n[models]\ngemini_tier = \"free\"\nstrong_base_url = \"https://x/v1\"\n",
+        )
+        .unwrap();
+        assert!(c.testing && c.redact_emails);
+        assert_eq!(c.lan_domain.as_deref(), Some("relay.example.com"));
+        assert_eq!(c.models.gemini_tier, GeminiTier::Free);
+        assert_eq!(c.models.strong_base_url.as_deref(), Some("https://x/v1"));
     }
 
     #[test]

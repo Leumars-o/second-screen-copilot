@@ -18,8 +18,15 @@ pub enum SecretKey {
     AssemblyAi,
     /// Optional strong-tier provider key.
     Strong,
+    /// Cloudflare API token, Zone→DNS→Edit on the `lan_domain` zone (CR-6).
+    Cloudflare,
     /// The PC's long-lived X25519 private key (base64).
     PcIdentity,
+    /// ACME (Let's Encrypt) account key, PEM (CR-6).
+    AcmeAccount,
+    /// Private key of the LAN TLS certificate, PEM (CR-6). The certificate itself is public and
+    /// may live on disk.
+    LanTlsKey,
     /// Per paired phone: keys + metadata JSON, by device id.
     PairedDevice(String),
 }
@@ -33,7 +40,10 @@ impl SecretKey {
             SecretKey::Deepgram => "api.deepgram".into(),
             SecretKey::AssemblyAi => "api.assemblyai".into(),
             SecretKey::Strong => "api.strong".into(),
+            SecretKey::Cloudflare => "api.cloudflare".into(),
             SecretKey::PcIdentity => "device.pc_identity".into(),
+            SecretKey::AcmeAccount => "device.acme_account".into(),
+            SecretKey::LanTlsKey => "device.lan_tls_key".into(),
             SecretKey::PairedDevice(id) => format!("device.paired.{id}"),
         }
     }

@@ -7,7 +7,7 @@ use crate::decision::{DecisionRouter, DecisionRouterConfig, DecisionSlot, HttpPr
 use crate::providers::anthropic::ANTHROPIC_BASE_URL;
 use crate::providers::gemini::GEMINI_BASE_URL;
 use crate::providers::openai::{GROQ_BASE_URL, OPENAI_BASE_URL};
-use crate::providers::{Anthropic, Gemini, GeminiTier, Ollama, OpenAiCompat, is_loopback_url};
+use crate::providers::{Anthropic, Gemini, Ollama, OpenAiCompat, is_loopback_url};
 use ssc_core::config::Config;
 use ssc_core::protocol::Mode;
 use ssc_core::secrets::{Secret, SecretKey, SecretStore};
@@ -16,17 +16,10 @@ use ssc_core::{Result, SscError};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Router settings that aren't in `ssc-core::Config` (see CR-5).
+/// Internal knobs that aren't user settings (user settings live in `Config`, CR-5): timings and
+/// provider base URLs that tests point at mock servers.
 #[derive(Debug, Clone)]
 pub struct RouterOptions {
-    /// Declared tier of the Gemini key. `Free` is refused unless `testing`.
-    pub gemini_tier: GeminiTier,
-    /// Test builds only: allows the Gemini free tier.
-    pub testing: bool,
-    /// Also mask emails when redaction is on.
-    pub redact_emails: bool,
-    /// Base URL for a strong model whose provider isn't `anthropic`, `openai` or `groq`.
-    pub strong_base_url: Option<String>,
     /// Strong model: fail over to the fast chain when no token arrives within this.
     pub strong_first_token_ms: u64,
     pub decision_probe_interval: Duration,
@@ -39,10 +32,6 @@ pub struct RouterOptions {
 impl Default for RouterOptions {
     fn default() -> Self {
         Self {
-            gemini_tier: GeminiTier::Paid,
-            testing: false,
-            redact_emails: false,
-            strong_base_url: None,
             strong_first_token_ms: 4000,
             decision_probe_interval: Duration::from_secs(10),
             groq_base_url: GROQ_BASE_URL.into(),
@@ -69,7 +58,7 @@ fn key(secrets: &dyn SecretStore, k: SecretKey) -> Result<Option<Secret>> {
 
 /// Build every model client for `cfg.mode`.
 pub fn build(cfg: &Config, secrets: &dyn SecretStore, clock: Arc<dyn Clock>, opts: &RouterOptions) -> Result<Models> {
-    let redaction = cfg.redaction.then_some(ssc_redact::Options { emails: opts.redact_emails });
+    let redaction = cfg.redaction.then_some(ssc_redact::Options { emails: cfg.redact_emails });
     let m = &cfg.models;
     let local_answer = Arc::new(Ollama::new(&m.ollama_url, &m.local_answer_model));
     let postcall_local = Arc::new(Ollama::new(&m.ollama_url, &m.local_postcall_model));
@@ -110,14 +99,14 @@ pub fn build(cfg: &Config, secrets: &dyn SecretStore, clock: Arc<dyn Clock>, opt
         groq_budget = Some(b);
     }
     if let Some(k) = key(secrets, SecretKey::Gemini)? {
-        let g = Gemini::new(&opts.gemini_base_url, &m.gemini_model, k, opts.gemini_tier, opts.testing)?;
+        let g = Gemini::new(&opts.gemini_base_url, &m.gemini_model, k, m.gemini_tier, cfg.testing)?;
         fast.push(Route::new(Arc::new(g)));
     }
     // Offline in cloud mode: the local model still answers.
     fast.push(Route::new(local_answer));
 
     let strong = match &m.strong_model {
-        Some(spec) if !spec.trim().is_empty() => build_strong(spec, secrets, opts)?,
+        Some(spec) if !spec.trim().is_empty() => build_strong(spec, m.strong_base_url.as_deref(), secrets, opts)?,
         _ => None,
     };
     let postcall: Arc<dyn AnswerModel> = strong.clone().unwrap_or(postcall_local);
@@ -139,7 +128,12 @@ pub fn build(cfg: &Config, secrets: &dyn SecretStore, clock: Arc<dyn Clock>, opt
 
 /// `"provider/model"`: `anthropic/…` (Messages API), `openai/…`, `groq/…`, or any other provider
 /// name with `strong_base_url` set (OpenAI-compatible). Missing key → no strong tier.
-fn build_strong(spec: &str, secrets: &dyn SecretStore, opts: &RouterOptions) -> Result<Option<Arc<dyn AnswerModel>>> {
+fn build_strong(
+    spec: &str,
+    strong_base_url: Option<&str>,
+    secrets: &dyn SecretStore,
+    opts: &RouterOptions,
+) -> Result<Option<Arc<dyn AnswerModel>>> {
     let (provider, model) = spec
         .split_once('/')
         .ok_or_else(|| SscError::Invalid(format!("strong_model must be provider/model: {spec}")))?;
@@ -158,9 +152,7 @@ fn build_strong(spec: &str, secrets: &dyn SecretStore, opts: &RouterOptions) -> 
             None => return Ok(None),
         },
         other => {
-            let base = opts
-                .strong_base_url
-                .as_deref()
+            let base = strong_base_url
                 .ok_or_else(|| SscError::Invalid(format!("strong provider '{other}' needs strong_base_url")))?;
             match strong_key {
                 Some(k) => Arc::new(OpenAiCompat::new(other, base, model, k)),
@@ -259,23 +251,25 @@ mod tests {
 
     #[test]
     fn gemini_free_tier_refused_outside_testing() {
-        let opts = RouterOptions { gemini_tier: GeminiTier::Free, ..Default::default() };
-        let r = build(&cloud_cfg(), &all_keys(), Arc::new(MockClock::new(0)), &opts);
+        let o = RouterOptions::default();
+        let mut cfg = cloud_cfg();
+        cfg.models.gemini_tier = ssc_core::config::GeminiTier::Free;
+        let r = build(&cfg, &all_keys(), Arc::new(MockClock::new(0)), &o);
         assert!(matches!(r, Err(SscError::Policy(_))));
-        let opts = RouterOptions { gemini_tier: GeminiTier::Free, testing: true, ..Default::default() };
-        assert!(build(&cloud_cfg(), &all_keys(), Arc::new(MockClock::new(0)), &opts).is_ok());
+        cfg.testing = true;
+        assert!(build(&cfg, &all_keys(), Arc::new(MockClock::new(0)), &o).is_ok());
     }
 
     #[test]
     fn strong_provider_variants() {
         let s = all_keys();
         let o = RouterOptions::default();
-        assert_eq!(build_strong("openai/gpt-x", &s, &o).unwrap().unwrap().id(), "openai/gpt-x");
-        assert_eq!(build_strong("groq/qwen/qwen3", &s, &o).unwrap().unwrap().id(), "groq/qwen/qwen3");
-        assert!(build_strong("openrouter/x", &s, &o).is_err());
-        let o2 = RouterOptions { strong_base_url: Some("https://openrouter.ai/api/v1".into()), ..Default::default() };
-        assert_eq!(build_strong("openrouter/a/b", &s, &o2).unwrap().unwrap().id(), "openrouter/a/b");
-        assert!(build_strong("nomodel", &s, &o).is_err());
-        assert!(build_strong("anthropic/x", &MemorySecretStore::default(), &o).unwrap().is_none());
+        assert_eq!(build_strong("openai/gpt-x", None, &s, &o).unwrap().unwrap().id(), "openai/gpt-x");
+        assert_eq!(build_strong("groq/qwen/qwen3", None, &s, &o).unwrap().unwrap().id(), "groq/qwen/qwen3");
+        assert!(build_strong("openrouter/x", None, &s, &o).is_err());
+        let base = Some("https://openrouter.ai/api/v1");
+        assert_eq!(build_strong("openrouter/a/b", base, &s, &o).unwrap().unwrap().id(), "openrouter/a/b");
+        assert!(build_strong("nomodel", None, &s, &o).is_err());
+        assert!(build_strong("anthropic/x", None, &MemorySecretStore::default(), &o).unwrap().is_none());
     }
 }

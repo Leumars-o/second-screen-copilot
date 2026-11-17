@@ -18,12 +18,7 @@ use tokio::sync::mpsc;
 
 pub const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com";
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum GeminiTier {
-    #[default]
-    Paid,
-    Free,
-}
+pub use ssc_core::config::GeminiTier;
 
 pub struct Gemini {
     id: String,
