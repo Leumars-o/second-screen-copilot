@@ -11,7 +11,7 @@ use ssc_core::secrets::Secret;
 use ssc_core::traits::{AnswerModel, Cancel, DecisionModel};
 use ssc_core::types::{Prompt, Token};
 use ssc_router::budget::BudgetTracker;
-use ssc_router::providers::{Anthropic, Gemini, GeminiTier, Ollama, OpenAiCompat};
+use ssc_router::providers::{Anthropic, GeminiTier, Ollama, OpenAiCompat};
 use ssc_router::{AnswerRouter, Route, SystemOneDecision};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -63,13 +63,20 @@ async fn groq_streams_fixture() {
 #[tokio::test]
 async fn gemini_streams_fixture() {
     let srv = serve(vec![Reply::sse(GEMINI)]).await;
-    let m = Gemini::new(&srv.url(), "gemini-2.5-flash-lite", Secret::new("test-key"), GeminiTier::Paid, false).unwrap();
+    let m = OpenAiCompat::gemini(&srv.url(), "gemini-2.5-flash-lite", Secret::new("test-key"), GeminiTier::Paid, false)
+        .unwrap();
     let (res, text) = collect(&m).await;
     assert_eq!(text, CUES);
     assert_eq!(res.unwrap().tokens_out, 16);
     let req = &srv.requests()[0];
-    assert_eq!(req.path, "/v1beta/models/gemini-2.5-flash-lite:streamGenerateContent?alt=sse");
-    assert_eq!(req.header("x-goog-api-key"), Some("test-key"));
+    // Same OpenAI-compatible adapter as Groq: `{base}/chat/completions`, Bearer key.
+    assert_eq!(req.path, "/chat/completions");
+    assert_eq!(req.header("authorization"), Some("Bearer test-key"));
+    assert!(!req.path.contains("key="), "key must travel in a header, not the URL");
+    let body = req.json();
+    assert_eq!(body["model"], "gemini-2.5-flash-lite");
+    assert_eq!(body["stream"], true);
+    assert_eq!(body["reasoning_effort"], "none");
 }
 
 #[tokio::test]
@@ -83,20 +90,26 @@ async fn ollama_streams_ndjson_fixture() {
     let req = &srv.requests()[0];
     assert_eq!(req.path, "/api/chat");
     assert_eq!(req.json()["keep_alive"], "30m");
+    assert_eq!(req.json()["think"], false);
     assert_eq!(req.json()["messages"][0]["content"], "You are a copilot.");
 }
 
 #[tokio::test]
 async fn anthropic_streams_fixture() {
     let srv = serve(vec![Reply::sse(ANTHROPIC)]).await;
-    let m = Anthropic::new(&srv.url(), "strong-model", Secret::new("test-key"));
+    let m = Anthropic::new(&srv.url(), "claude-opus-5-5", Secret::new("test-key"));
     let (res, text) = collect(&m).await;
-    assert_eq!(text, "---\n1: Start with user interviews\n");
+    assert_eq!(text, "---\n1: Start with user interviews\n", "thinking blocks never reach the output");
     assert_eq!(res.unwrap().tokens_out, 12);
     let req = &srv.requests()[0];
     assert_eq!(req.path, "/v1/messages");
     assert_eq!(req.header("x-api-key"), Some("test-key"));
-    assert_eq!(req.header("anthropic-version"), Some("2023-06-01"));
+    assert!(req.header("authorization").is_none());
+    assert_eq!(req.header("anthropic-version"), Some("2026-10-21"));
+    let body = req.json();
+    assert_eq!(body["thinking"]["type"], "adaptive");
+    assert_eq!(body["output_config"]["effort"], "low");
+    assert!(body.get("temperature").is_none());
 }
 
 #[tokio::test]
@@ -179,7 +192,7 @@ async fn groq_429_fails_over_to_gemini_with_redaction() {
     let clock = Arc::new(MockClock::new(0));
     let budget = Arc::new(BudgetTracker::new(Default::default(), clock));
     let groq = Arc::new(OpenAiCompat::groq(&groq_srv.url(), "m", Secret::new("k")));
-    let gem = Arc::new(Gemini::new(&gem_srv.url(), "g", Secret::new("k"), GeminiTier::Paid, false).unwrap());
+    let gem = Arc::new(OpenAiCompat::gemini(&gem_srv.url(), "g", Secret::new("k"), GeminiTier::Paid, false).unwrap());
     let router = AnswerRouter::new(
         Mode::Cloud,
         Some(Default::default()),
@@ -213,7 +226,9 @@ async fn slow_first_token_fails_over() {
         None,
         vec![
             Route::new(Arc::new(OpenAiCompat::groq(&slow.url(), "m", Secret::new("k")))).first_token_ms(200),
-            Route::new(Arc::new(Gemini::new(&fast.url(), "g", Secret::new("k"), GeminiTier::Paid, false).unwrap())),
+            Route::new(Arc::new(
+                OpenAiCompat::gemini(&fast.url(), "g", Secret::new("k"), GeminiTier::Paid, false).unwrap(),
+            )),
         ],
         None,
     )
@@ -228,7 +243,7 @@ async fn slow_first_token_fails_over() {
 #[tokio::test]
 async fn systemone_decision_over_http() {
     let srv = serve(vec![Reply::ok("application/json", include_bytes!("fixtures/systemone_response.json"))]).await;
-    let d = SystemOneDecision::new(&format!("{}/v1", srv.url()), "jev-1.14", Some(Secret::new("ts-key")));
+    let d = SystemOneDecision::new(&srv.url(), "jev-1.14.0", Some(Secret::new("ts-key")));
     let input = DecisionInput {
         question: "How much is the pro plan?".into(),
         screen_diff: "Pricing page".into(),
@@ -251,4 +266,22 @@ async fn systemone_bad_payload_is_invalid() {
         DecisionInput { question: "q".into(), screen_diff: String::new(), profiles: vec!["a".into(), "b".into()] };
     assert!(matches!(d.decide(&input).await, Err(SscError::Invalid(_))));
     assert!(srv.requests()[0].header("authorization").is_none());
+}
+
+/// Verbatim error from the live API (2026-11-17): the message must survive into our error.
+#[tokio::test]
+async fn systemone_error_detail_is_reported() {
+    let srv = serve(vec![Reply::status(
+        400,
+        r#"{"detail":{"error_type":"api_usage_error","message":"Unknown model: jev-1.14"}}"#,
+    )])
+    .await;
+    let d = SystemOneDecision::new(&srv.url(), "jev-1.14", Some(Secret::new("ts-key")));
+    let input =
+        DecisionInput { question: "q".into(), screen_diff: String::new(), profiles: vec!["a".into(), "b".into()] };
+    let e = d.decide(&input).await.unwrap_err();
+    let s = e.to_string();
+    assert!(matches!(e, SscError::Invalid(_)), "{e:?}");
+    assert!(s.contains("api_usage_error") && s.contains("Unknown model: jev-1.14"), "{s}");
+    assert!(!s.contains("ts-key"));
 }

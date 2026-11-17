@@ -1,27 +1,38 @@
 {
-  "model": "jev-1.14",
+  "model": "jev-1.14.0",
   "state": "Last question from the other person:\nHow much is the pro plan?\n\nScreen changes:\nPricing page\n\nProfiles: sales, support",
   "questions": {
     "needs_answer": { "type": "noul", "instructions": "Is the other person asking something the user should answer now?" },
     "intent": {
       "type": "choice",
       "instructions": "What is the question about?",
-      "criteria": { "pricing": null, "objection": null, "technical": null, "scheduling": null, "small_talk": null, "none": null }
+      "criteria": {
+        "pricing": "prices, plans, discounts or billing",
+        "objection": "a concern or pushback",
+        "technical": "how something works: features, integrations, security, setup",
+        "scheduling": "dates, times, meetings or deadlines",
+        "small_talk": "greetings or chit-chat",
+        "none": "not a question, or none of these"
+      }
     },
     "answer_tier": {
       "type": "choice",
       "instructions": "Which answer does this need: a quick cue, a detailed technical answer, or none?",
-      "criteria": { "fast": null, "strong": null, "none": null }
+      "criteria": {
+        "fast": "a few quick cues are enough",
+        "strong": "needs a detailed or technical answer",
+        "none": "no answer needed"
+      }
     },
     "profile": {
       "type": "choice",
       "instructions": "Which profile's documents are most relevant?",
-      "criteria": { "sales": null, "support": null }
+      "criteria": { "sales": "the sales profile", "support": "the support profile" }
     },
     "urgency": {
       "type": "choice",
       "instructions": "How urgently does the user need an answer?",
-      "criteria": { "low": null, "medium": null, "high": null }
+      "criteria": { "low": "can wait", "medium": "should be answered soon", "high": "they are waiting for the answer now" }
     }
   }
 }

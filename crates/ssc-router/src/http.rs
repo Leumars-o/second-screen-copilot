@@ -67,12 +67,34 @@ fn retry_after_ms(h: &HeaderMap) -> Option<u64> {
     v.parse::<f64>().ok().filter(|s| *s >= 0.0).map(|s| (s * 1000.0) as u64)
 }
 
+/// The error object of a provider error body. Shapes seen: `{"error":{…}}` (OpenAI, Groq,
+/// Anthropic, Gemini native), `[{"error":{…}}]` (Gemini's OpenAI-compatible endpoint) and
+/// `{"detail":{"error_type","message"}}` (TypeSafe `/v1/systemone`, verified live 2026-11-17).
+fn error_object(body: &[u8]) -> Option<serde_json::Value> {
+    let v = match serde_json::from_slice(body).ok()? {
+        serde_json::Value::Array(a) => a.into_iter().next()?,
+        v => v,
+    };
+    let inner = v.get("error").or_else(|| v.get("detail")).filter(|e| e.is_object()).cloned();
+    Some(inner.unwrap_or(v))
+}
+
 fn error_code(body: &[u8]) -> Option<String> {
-    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let e = v.get("error").unwrap_or(&v);
+    let e = error_object(body)?;
     let pick = |k: &str| e.get(k).and_then(|x| x.as_str()).map(str::to_string);
-    let s = pick("code").or_else(|| pick("type")).or_else(|| pick("status"))?;
+    let s = pick("code").or_else(|| pick("error_type")).or_else(|| pick("type")).or_else(|| pick("status"))?;
     Some(s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.').take(64).collect())
+}
+
+/// The provider's human-readable error message, on one line and capped at `max` chars. Only for
+/// endpoints whose messages describe the request shape (e.g. "Unknown model: x"), not the prompt.
+/// Answer adapters never use it: chat providers can quote prompt text in their errors.
+pub fn error_message(body: &[u8], max: usize) -> Option<String> {
+    let e = error_object(body)?;
+    let m = e.get("message").and_then(|x| x.as_str())?;
+    let s: String = m.chars().map(|c| if c.is_control() { ' ' } else { c }).take(max).collect();
+    let s = s.trim().to_string();
+    (!s.is_empty()).then_some(s)
 }
 
 /// What a provider parser extracted from one chunk of the body.
@@ -181,6 +203,20 @@ mod tests {
         let s = e.to_string();
         assert!(s.contains("503") && s.contains("overloaded_error"), "{s}");
         assert!(!s.contains("secret prompt text"));
+    }
+
+    #[test]
+    fn error_body_shapes() {
+        let gemini_compat = br#"[{"error":{"code":429,"message":"quota","status":"RESOURCE_EXHAUSTED"}}]"#;
+        let e = map_status(StatusCode::BAD_GATEWAY, &HeaderMap::new(), gemini_compat, 0);
+        assert!(e.to_string().contains("RESOURCE_EXHAUSTED"), "{e}");
+        let ts = br#"{"detail":{"error_type":"api_usage_error","message":"Unknown model: jev-1.14\nmore"}}"#;
+        let e = map_status(StatusCode::BAD_REQUEST, &HeaderMap::new(), ts, 0);
+        assert!(e.to_string().contains("api_usage_error"), "{e}");
+        assert_eq!(error_message(ts, 200).as_deref(), Some("Unknown model: jev-1.14 more"));
+        assert_eq!(error_message(ts, 7).as_deref(), Some("Unknown"));
+        assert_eq!(error_message(b"not json", 50), None);
+        assert_eq!(error_message(br#"{"detail":"x"}"#, 50), None);
     }
 
     #[test]

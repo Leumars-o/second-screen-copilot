@@ -1,5 +1,20 @@
-//! Anthropic-style Messages API with SSE streaming, for the optional strong tier.
-//! The fixed prefix goes in `system` with `cache_control` so prompt caching applies.
+//! Native Claude Messages API with SSE streaming, for the strong tier (never an OpenAI shim:
+//! Build Sheet §10 item 8). Request shape checked against platform.claude.com, 2026-11-17:
+//!
+//! - `anthropic-version: 2026-10-21`. That version removes `temperature` / `top_p` / `top_k`
+//!   (400 on every model), and Claude Opus 5.5 rejects them anyway, so none is sent.
+//! - The fixed prefix goes in `system` with `cache_control` so prompt caching applies; thinking
+//!   config and effort are constant per adapter, which keeps the cache valid between requests.
+//! - `thinking: {type: "adaptive", display: "omitted"}`: Claude decides whether to think;
+//!   `omitted` skips streaming the thinking text, so answer text starts sooner. Opus 5.5 rejects
+//!   `{type: "disabled"}`.
+//! - `output_config.effort: "low"` (Opus 5.5 default is `medium`): the strong tier answers live,
+//!   so speed wins; Claude still thinks on genuinely hard questions.
+//! - Thinking counts toward `max_tokens`, so [`THINKING_HEADROOM`] is added to the prompt's
+//!   answer budget; answer length is held by the prompt and the cue grammar.
+//!
+//! Adaptive thinking and effort exist on Claude 4.6+ / 5.x models; an older model id fails with
+//! 400 and the router falls back to the fast chain.
 
 use super::model_id;
 use crate::http::{Step, StreamParser, drive, secret_header};
@@ -13,7 +28,13 @@ use ssc_core::{Result, SscError};
 use tokio::sync::mpsc;
 
 pub const ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com";
-pub const ANTHROPIC_VERSION: &str = "2023-06-01";
+pub const ANTHROPIC_VERSION: &str = "2026-10-21";
+/// Best available Claude model (Build Sheet §10 item 8). `Config.models.strong_model` defaults to
+/// `None` in frozen ssc-core; CR-8 proposes `anthropic/claude-opus-5-5` as the default.
+pub const DEFAULT_CLAUDE_MODEL: &str = "claude-opus-5-5";
+pub const DEFAULT_EFFORT: &str = "low";
+/// Output tokens reserved for thinking on top of the answer budget.
+pub const THINKING_HEADROOM: u32 = 2048;
 
 pub struct Anthropic {
     id: String,
@@ -21,6 +42,7 @@ pub struct Anthropic {
     model: String,
     key: Secret,
     client: reqwest::Client,
+    effort: String,
 }
 
 impl Anthropic {
@@ -31,17 +53,26 @@ impl Anthropic {
             model: model.to_string(),
             key,
             client: crate::http::client(),
+            effort: DEFAULT_EFFORT.into(),
         }
+    }
+
+    /// `low` | `medium` | `high` | `xhigh` | `max`. Keep it constant per adapter: changing effort
+    /// between requests can invalidate the prompt cache.
+    pub fn with_effort(mut self, effort: &str) -> Self {
+        self.effort = effort.into();
+        self
     }
 
     pub fn body(&self, p: &Prompt) -> Value {
         let mut b = json!({
             "model": self.model,
-            "max_tokens": p.max_tokens,
+            "max_tokens": p.max_tokens.saturating_add(THINKING_HEADROOM),
             "system": [ { "type": "text", "text": p.prefix, "cache_control": { "type": "ephemeral" } } ],
             "messages": [ { "role": "user", "content": p.dynamic } ],
+            "thinking": { "type": "adaptive", "display": "omitted" },
+            "output_config": { "effort": self.effort },
             "stream": true,
-            "temperature": p.temperature,
         });
         if !p.stop.is_empty() {
             b["stop_sequences"] = json!(p.stop);
@@ -123,13 +154,21 @@ mod tests {
 
     #[test]
     fn body_caches_prefix() {
-        let a = Anthropic::new(ANTHROPIC_BASE_URL, "strong-model", Secret::new("k"));
+        let a = Anthropic::new(ANTHROPIC_BASE_URL, DEFAULT_CLAUDE_MODEL, Secret::new("k"));
         let p = Prompt { prefix: "P".into(), dynamic: "D".into(), max_tokens: 300, temperature: 0.2, stop: vec![] };
         let b = a.body(&p);
+        assert_eq!(b["model"], "claude-opus-5-5");
         assert_eq!(b["system"][0]["text"], "P");
         assert_eq!(b["system"][0]["cache_control"]["type"], "ephemeral");
         assert_eq!(b["messages"][0]["content"], "D");
-        assert_eq!(b["max_tokens"], 300);
+        assert_eq!(b["max_tokens"], 300 + THINKING_HEADROOM);
+        assert_eq!(b["thinking"], json!({ "type": "adaptive", "display": "omitted" }));
+        assert_eq!(b["output_config"]["effort"], "low");
+        for banned in ["temperature", "top_p", "top_k"] {
+            assert!(b.get(banned).is_none(), "{banned} is a 400 on anthropic-version 2026-10-21");
+        }
+        let b = Anthropic::new(ANTHROPIC_BASE_URL, "m", Secret::new("k")).with_effort("medium").body(&p);
+        assert_eq!(b["output_config"]["effort"], "medium");
     }
 
     #[test]

@@ -3,6 +3,16 @@
 //! Prefix caching: the fixed prompt prefix is always the first (system) message and byte-stable,
 //! so Ollama reuses its KV cache for it; `keep_alive` keeps the model loaded between answers, and
 //! [`Ollama::warm_prefix`] pre-fills the cache before the first question.
+//!
+//! Why this is NOT on the shared OpenAI-compatible adapter (Build Sheet §10 item 8 exception,
+//! checked against Ollama's "OpenAI compatibility" docs, 2026-11-17): `/v1/chat/completions`
+//! accepts no `keep_alive` and no `options` (the docs: "The OpenAI API does not have a way of
+//! setting the context size"; `num_ctx` only via a Modelfile). Every request resets the model's
+//! unload timer to the request's `keep_alive`, so `/v1` calls would fall back to the 5-minute
+//! default and the live model would be unloaded between calls — a multi-second cold load on the
+//! next question. Thinking control there is only `reasoning_effort` mapped onto `think`. The
+//! KV-prefix reuse itself is server-side and would survive, but losing `keep_alive` and
+//! per-request `options` is material for first-token latency, so the native path stays.
 
 use super::{is_loopback_url, model_id};
 use crate::http::{Step, StreamParser, drive};
@@ -23,6 +33,11 @@ pub struct Ollama {
     keep_alive: String,
     client: reqwest::Client,
     local: bool,
+    /// `think` field: `Some(false)` (default) turns thinking off on thinking-capable models
+    /// (qwen3, gemma) so the first streamed token is answer text; models that can't turn it off
+    /// use their lowest level and stream it in `message.thinking`, which is never shown.
+    /// `None` leaves the model default.
+    think: Option<bool>,
 }
 
 impl Ollama {
@@ -34,6 +49,7 @@ impl Ollama {
             keep_alive: DEFAULT_KEEP_ALIVE.into(),
             client: crate::http::client(),
             local: is_loopback_url(base_url),
+            think: Some(false),
         }
     }
 
@@ -42,12 +58,19 @@ impl Ollama {
         self
     }
 
+    /// Set the `think` field (`None` = model default). Used for the post-call model, which isn't
+    /// latency-bound.
+    pub fn with_think(mut self, think: Option<bool>) -> Self {
+        self.think = think;
+        self
+    }
+
     pub fn body(&self, p: &Prompt) -> Value {
         let mut options = json!({ "temperature": p.temperature, "num_predict": p.max_tokens });
         if !p.stop.is_empty() {
             options["stop"] = json!(p.stop);
         }
-        json!({
+        let mut b = json!({
             "model": self.model,
             "messages": [
                 { "role": "system", "content": p.prefix },
@@ -56,7 +79,11 @@ impl Ollama {
             "stream": true,
             "keep_alive": self.keep_alive,
             "options": options,
-        })
+        });
+        if let Some(t) = self.think {
+            b["think"] = json!(t);
+        }
+        b
     }
 
     /// Load the model (empty `messages` loads without generating).
@@ -150,6 +177,9 @@ mod tests {
         assert_eq!(b["messages"][0]["content"], "FIXED");
         assert_eq!(b["keep_alive"], DEFAULT_KEEP_ALIVE);
         assert_eq!(b["options"]["num_predict"], 60);
+        assert_eq!(b["think"], false, "live path turns thinking off");
+        assert!(o.with_think(None).body(&p).get("think").is_none());
+        let o = Ollama::new("http://127.0.0.1:11434/", "gemma4:e2b");
         assert!(!o.is_cloud());
         assert_eq!(o.id(), "ollama/gemma4:e2b");
         assert!(Ollama::new("http://10.0.0.5:11434", "m").is_cloud());

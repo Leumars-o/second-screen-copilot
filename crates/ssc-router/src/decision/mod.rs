@@ -72,12 +72,27 @@ impl DecisionModel for SystemOneDecision {
         let headers = resp.headers().clone();
         let bytes = resp.bytes().await.map_err(|e| map_reqwest(e, ms()))?;
         if !status.is_success() {
-            return Err(map_status(status, &headers, &bytes, ms()));
+            return Err(with_detail(map_status(status, &headers, &bytes, ms()), &bytes));
         }
         let v: serde_json::Value =
             serde_json::from_slice(&bytes).map_err(|_| SscError::Invalid("systemone response: not JSON".into()))?;
         let normalised = systemone::map_response(&v, &plan)?;
         Decision::from_value(&normalised).map_err(|e| SscError::Invalid(e.to_string()))
+    }
+}
+
+/// Longest provider error message kept in an error.
+const DETAIL_MAX_CHARS: usize = 160;
+
+/// Append the provider's `detail.message` (e.g. "Unknown model: jev-1.14") so a failing call is
+/// diagnosable. Safe here, unlike in answer adapters: systemone errors describe the request shape,
+/// the body never contains our key, and the input was already redacted before a cloud call.
+fn with_detail(e: SscError, body: &[u8]) -> SscError {
+    let Some(msg) = crate::http::error_message(body, DETAIL_MAX_CHARS) else { return e };
+    match e {
+        SscError::Invalid(s) => SscError::Invalid(format!("systemone {s}: {msg}")),
+        SscError::Unavailable(s) => SscError::Unavailable(format!("systemone {s}: {msg}")),
+        other => other,
     }
 }
 

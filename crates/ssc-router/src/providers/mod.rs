@@ -1,16 +1,21 @@
-//! Answer-model adapters. Each implements [`ssc_core::traits::AnswerModel`] over a warm pooled
-//! client and streams through [`crate::http::drive`]. Keys come from `SecretStore` and are only
-//! ever placed in sensitive headers.
+//! Answer-model adapters (Build Sheet §10 item 8). Each implements
+//! [`ssc_core::traits::AnswerModel`] over a warm pooled client and streams through
+//! [`crate::http::drive`]; SSE framing is shared ([`crate::wire::SseDecoder`]). Keys come from
+//! `SecretStore` and are only ever placed in sensitive headers.
+//!
+//! - [`OpenAiCompat`]: the one OpenAI-compatible chat-completions adapter — Groq, Gemini
+//!   ([`OpenAiCompat::gemini`]) and OpenAI-compatible strong models.
+//! - [`Anthropic`]: native Messages API for Claude (prompt caching, adaptive thinking, effort).
+//! - [`Ollama`]: native `/api/chat` (kept on purpose; see the module docs for what `/v1` loses).
 
 pub mod anthropic;
-pub mod gemini;
 pub mod ollama;
 pub mod openai;
 
 pub use anthropic::Anthropic;
-pub use gemini::{Gemini, GeminiTier};
 pub use ollama::Ollama;
 pub use openai::OpenAiCompat;
+pub use ssc_core::config::GeminiTier;
 
 use ssc_core::secrets::Secret;
 

@@ -1,21 +1,25 @@
 //! Mapping between [`DecisionInput`] / the normalised [`Decision`] and the TypeSafe
 //! `/v1/systemone` wire format. Isolated here so the wire shape can be corrected in one place.
 //!
-//! UNVERIFIED: confirm against TypeSafe docs (Build Sheet §9).
-//! What was checkable from public gateway docs (LLM Gateway, ZenMux, Respan; Nov 2026), *not* from
-//! TypeSafe's own reference or a live call:
-//! - Request: `{ "model", "state": <string>, "questions": { <id>: { "type", "instructions", "criteria"? } } }`.
-//!   Types: `noul` (yes/no; `criteria` optional), `choice` (`criteria` = object option → description
-//!   or null), `score` (`criteria` = ordered array of levels), `box` (images).
-//! - Response: `{ "model", "answers": { <id>: { "type", "noul" | "choice" | "score", "probabilities"?,
-//!   "confidence"?, "legend"? } }, "usage": { "input_tokens", "output_tokens" } }`. `noul` is the
-//!   probability of yes (0..1); `choice` is the top option with `probabilities` per option.
-//! - Errors: `{ "error": { "message", "type", "param", "code" } }` with the usual HTTP statuses.
+//! Wire shape (third-party gateway docs, confirmed by the lead's live Jev call 2026-11-17, CR-7):
+//! - `POST https://api.typesafe.ai/v1/systemone`, `Authorization: Bearer <key>`. Ollama ≥ 0.35
+//!   serves the same path for `tev1` without auth (Ollama 0.32 returns 404).
+//! - Request: `{ "model", "state": <string>, "questions": { <id>: { "type", "instructions",
+//!   "criteria" } } }`. Types: `noul` (yes/no; `criteria` optional), `choice` (`criteria` = object
+//!   option → description; 2–26 options for Tev1), `score` (ordered levels; not used here).
+//! - Response: `{ "model", "answers": { <id>: {type:"noul", noul: p} | {type:"choice", choice,
+//!   confidence, probabilities} | {type:"score", score, legend, probabilities, confidence} },
+//!   "usage": { "input_tokens", "output_tokens" } }`. `noul` is P(yes); `probabilities` may list
+//!   only some options.
+//! - Errors: `{"detail":{"error_type","message"}}` (e.g. 400 `api_usage_error` "Unknown model:
+//!   jev-1.14"); the message is kept (truncated) in our error so failures are diagnosable.
+//! - Model ids: `jev-latest` resolves to `jev-1.14.0`; `jev-1.13.0` / `jev-1.14.0` are pinned.
+//!   `jev-1.14` is rejected. Tev1 on Ollama: `tev1:4b`, ~2K context.
+//! - `/v1/decisions` is said to be the successor endpoint; we stay on `/v1/systemone` until it is
+//!   documented and verified.
 //!
-//! Not verified at all: whether Ollama serves `/v1/systemone` for Tev1 4B (the spec says both speak
-//! the same format), whether a one-option `choice` is accepted (we don't send one), and the exact
-//! model ids. Urgency is sent as `choice` (not `score`) because the decision contract needs the
-//! probability of the chosen level, which `choice` gives directly.
+//! Urgency is sent as `choice` (not `score`) because the decision contract needs the probability
+//! of the chosen level, which `choice` gives directly.
 
 use serde_json::{Map, Value, json};
 use ssc_core::decision::{DecisionInput, QUESTIONS};
@@ -67,6 +71,32 @@ pub struct Plan {
 /// Profile used when the user has no profiles yet.
 pub const DEFAULT_PROFILE: &str = "default";
 
+/// Most options a `choice` question may carry (Tev1 accepts 2–26). Extra profiles are dropped
+/// in the order given (the caller lists the most relevant first).
+pub const MAX_CHOICES: usize = 26;
+
+/// `choice` criteria descriptions for the fixed options in `questions.json` (the contract lists
+/// only option ids). Kept short: Tev1 has a ~2K-token context and the input budget is 500.
+fn describe(question: &str, option: &str) -> String {
+    let fixed = match (question, option) {
+        ("intent", "pricing") => "prices, plans, discounts or billing",
+        ("intent", "objection") => "a concern or pushback",
+        ("intent", "technical") => "how something works: features, integrations, security, setup",
+        ("intent", "scheduling") => "dates, times, meetings or deadlines",
+        ("intent", "small_talk") => "greetings or chit-chat",
+        ("intent", "none") => "not a question, or none of these",
+        ("answer_tier", "fast") => "a few quick cues are enough",
+        ("answer_tier", "strong") => "needs a detailed or technical answer",
+        ("answer_tier", "none") => "no answer needed",
+        ("urgency", "low") => "can wait",
+        ("urgency", "medium") => "should be answered soon",
+        ("urgency", "high") => "they are waiting for the answer now",
+        ("profile", p) => return format!("the {p} profile"),
+        (_, o) => return o.replace('_', " "),
+    };
+    fixed.to_string()
+}
+
 fn truncate_bytes(s: &str, max: usize) -> &str {
     if s.len() <= max {
         return s;
@@ -93,8 +123,13 @@ pub fn build_request(model: &str, input: &DecisionInput) -> (Value, Plan) {
         let choices = match &q.choices {
             Some(c) => c.clone(),
             None => {
-                let mut p: Vec<String> = input.profiles.iter().filter(|s| !s.is_empty()).cloned().collect();
-                p.dedup();
+                let mut p: Vec<String> = Vec::new();
+                for s in input.profiles.iter().filter(|s| !s.is_empty()) {
+                    if !p.contains(s) {
+                        p.push(s.clone());
+                    }
+                }
+                p.truncate(MAX_CHOICES);
                 p
             }
         };
@@ -109,7 +144,8 @@ pub fn build_request(model: &str, input: &DecisionInput) -> (Value, Plan) {
                 plan.fixed.insert(q.id.clone(), json!({ "value": value, "p": 1.0 }));
             }
             _ => {
-                let criteria: Map<String, Value> = choices.iter().map(|c| (c.clone(), Value::Null)).collect();
+                let criteria: Map<String, Value> =
+                    choices.iter().map(|c| (c.clone(), Value::String(describe(&q.id, c)))).collect();
                 questions
                     .insert(q.id.clone(), json!({ "type": "choice", "instructions": q.text, "criteria": criteria }));
                 plan.asked.push((q.id.clone(), choices));
@@ -172,7 +208,7 @@ mod tests {
 
     #[test]
     fn request_shape() {
-        let (req, plan) = build_request("jev-1.14", &input(&["sales", "support"]));
+        let (req, plan) = build_request("jev-1.14.0", &input(&["sales", "support"]));
         let expected: Value =
             serde_json::from_str(include_str!("../../tests/fixtures/systemone_request.json")).unwrap();
         assert_eq!(req, expected);
@@ -181,7 +217,7 @@ mod tests {
 
     #[test]
     fn maps_fixture_response() {
-        let (_, plan) = build_request("jev-1.14", &input(&["sales", "support"]));
+        let (_, plan) = build_request("jev-1.14.0", &input(&["sales", "support"]));
         let resp: Value = serde_json::from_str(include_str!("../../tests/fixtures/systemone_response.json")).unwrap();
         let d = Decision::from_value(&map_response(&resp, &plan).unwrap()).unwrap();
         assert!(d.needs_answer.value);
@@ -210,6 +246,49 @@ mod tests {
         assert_eq!(plan.fixed["profile"], json!({ "value": "only", "p": 1.0 }));
         let (_, plan) = build_request("m", &input(&[]));
         assert_eq!(plan.fixed["profile"]["value"], DEFAULT_PROFILE);
+        let (req, _) = build_request("m", &input(&["a", "a", ""]));
+        assert!(req["questions"].get("profile").is_none(), "duplicates and blanks don't count as options");
+    }
+
+    #[test]
+    fn choice_criteria_map_every_option_to_a_description() {
+        let (req, _) = build_request("m", &input(&["sales", "support"]));
+        for (id, q) in req["questions"].as_object().unwrap() {
+            if q["type"] == "choice" {
+                let c = q["criteria"].as_object().unwrap();
+                assert!((2..=MAX_CHOICES).contains(&c.len()), "{id}");
+                assert!(c.values().all(|d| d.as_str().is_some_and(|s| !s.is_empty())), "{id}: {c:?}");
+            } else {
+                assert_eq!(q["type"], "noul");
+            }
+        }
+    }
+
+    #[test]
+    fn profiles_capped_at_26_options() {
+        let many: Vec<String> = (0..40).map(|i| format!("p{i}")).collect();
+        let refs: Vec<&str> = many.iter().map(String::as_str).collect();
+        let (req, plan) = build_request("m", &input(&refs));
+        let c = req["questions"]["profile"]["criteria"].as_object().unwrap();
+        assert_eq!(c.len(), MAX_CHOICES);
+        assert!(c.contains_key("p0") && c.contains_key("p25") && !c.contains_key("p26"));
+        assert_eq!(plan.asked.iter().find(|(id, _)| id == "profile").unwrap().1.len(), MAX_CHOICES);
+    }
+
+    #[test]
+    fn maps_live_jev_response_with_partial_probabilities() {
+        // Verbatim shape of the lead's live Jev call (2026-11-17): `probabilities` lists only
+        // some options and `confidence` comes first.
+        let (_, plan) = build_request("jev-1.14.0", &input(&["sales", "support"]));
+        let mut resp: Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/systemone_response.json")).unwrap();
+        resp["answers"]["intent"] = json!({"type":"choice","choice":"pricing","confidence":1.0,
+            "probabilities":{"pricing":1.0,"technical":0.0,"none":0.0}});
+        resp["answers"]["needs_answer"] = json!({"type":"noul","noul":0.89});
+        let d = Decision::from_value(&map_response(&resp, &plan).unwrap()).unwrap();
+        assert_eq!(d.intent.value, Intent::Pricing);
+        assert!((d.intent.p - 1.0).abs() < 1e-9);
+        assert!((d.needs_answer.p - 0.89).abs() < 1e-9);
     }
 
     #[test]

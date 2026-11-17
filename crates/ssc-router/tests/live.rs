@@ -9,9 +9,9 @@ use ssc_core::decision::DecisionInput;
 use ssc_core::secrets::{KeychainStore, SecretKey, SecretStore};
 use ssc_core::traits::{AnswerModel, Cancel, DecisionModel};
 use ssc_core::types::Prompt;
-use ssc_router::providers::gemini::GEMINI_BASE_URL;
-use ssc_router::providers::openai::GROQ_BASE_URL;
-use ssc_router::providers::{Gemini, GeminiTier, Ollama, OpenAiCompat};
+use ssc_router::providers::anthropic::{ANTHROPIC_BASE_URL, DEFAULT_CLAUDE_MODEL};
+use ssc_router::providers::openai::{GEMINI_BASE_URL, GROQ_BASE_URL};
+use ssc_router::providers::{Anthropic, GeminiTier, Ollama, OpenAiCompat};
 use ssc_router::{SystemOneDecision, parse_answer};
 use tokio::sync::mpsc;
 
@@ -56,8 +56,15 @@ async fn live_groq() {
 async fn live_gemini() {
     let Some(k) = KeychainStore.get(&SecretKey::Gemini).unwrap() else { return eprintln!("skip: no Gemini key") };
     // Live checks use a test prompt only, so the free tier is acceptable here.
-    let g = Gemini::new(GEMINI_BASE_URL, &Config::default().models.gemini_model, k, GeminiTier::Free, true).unwrap();
+    let g = OpenAiCompat::gemini(GEMINI_BASE_URL, &Config::default().models.gemini_model, k, GeminiTier::Free, true)
+        .unwrap();
     check(&g).await;
+}
+
+#[tokio::test]
+async fn live_claude() {
+    let Some(k) = KeychainStore.get(&SecretKey::Strong).unwrap() else { return eprintln!("skip: no strong key") };
+    check(&Anthropic::new(ANTHROPIC_BASE_URL, DEFAULT_CLAUDE_MODEL, k)).await;
 }
 
 #[tokio::test]

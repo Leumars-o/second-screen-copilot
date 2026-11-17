@@ -5,9 +5,8 @@ use crate::answer::{AnswerRouter, Route};
 use crate::budget::BudgetTracker;
 use crate::decision::{DecisionRouter, DecisionRouterConfig, DecisionSlot, HttpProbe, NetworkProbe, SystemOneDecision};
 use crate::providers::anthropic::ANTHROPIC_BASE_URL;
-use crate::providers::gemini::GEMINI_BASE_URL;
-use crate::providers::openai::{GROQ_BASE_URL, OPENAI_BASE_URL};
-use crate::providers::{Anthropic, Gemini, Ollama, OpenAiCompat, is_loopback_url};
+use crate::providers::openai::{GEMINI_BASE_URL, GROQ_BASE_URL, OPENAI_BASE_URL};
+use crate::providers::{Anthropic, Ollama, OpenAiCompat, is_loopback_url};
 use ssc_core::config::Config;
 use ssc_core::protocol::Mode;
 use ssc_core::secrets::{Secret, SecretKey, SecretStore};
@@ -61,7 +60,7 @@ pub fn build(cfg: &Config, secrets: &dyn SecretStore, clock: Arc<dyn Clock>, opt
     let redaction = cfg.redaction.then_some(ssc_redact::Options { emails: cfg.redact_emails });
     let m = &cfg.models;
     let local_answer = Arc::new(Ollama::new(&m.ollama_url, &m.local_answer_model));
-    let postcall_local = Arc::new(Ollama::new(&m.ollama_url, &m.local_postcall_model));
+    let postcall_local = Arc::new(Ollama::new(&m.ollama_url, &m.local_postcall_model).with_think(None));
     let tev1 = DecisionSlot {
         model: Arc::new(SystemOneDecision::new(&m.ollama_url, &m.decision_local_model, None)),
         is_cloud: !is_loopback_url(&m.ollama_url),
@@ -99,7 +98,7 @@ pub fn build(cfg: &Config, secrets: &dyn SecretStore, clock: Arc<dyn Clock>, opt
         groq_budget = Some(b);
     }
     if let Some(k) = key(secrets, SecretKey::Gemini)? {
-        let g = Gemini::new(&opts.gemini_base_url, &m.gemini_model, k, m.gemini_tier, cfg.testing)?;
+        let g = OpenAiCompat::gemini(&opts.gemini_base_url, &m.gemini_model, k, m.gemini_tier, cfg.testing)?;
         fast.push(Route::new(Arc::new(g)));
     }
     // Offline in cloud mode: the local model still answers.
@@ -193,7 +192,7 @@ mod tests {
 
     fn cloud_cfg() -> Config {
         let mut c = Config::default();
-        c.models.strong_model = Some("anthropic/strong-model".into());
+        c.models.strong_model = Some("anthropic/claude-opus-5-5".into());
         c.models.decision_cloud_base_url = "https://decisions.example.com".into();
         c
     }
@@ -231,7 +230,7 @@ mod tests {
                 "groq/openai/gpt-oss-120b",
                 "gemini/gemini-2.5-flash-lite",
                 "ollama/gemma4:e2b",
-                "anthropic/strong-model"
+                "anthropic/claude-opus-5-5"
             ]
         );
         assert!(m.decisions.has_cloud());

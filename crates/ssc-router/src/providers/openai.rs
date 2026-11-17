@@ -1,11 +1,15 @@
-//! OpenAI-compatible chat completions with SSE streaming: Groq (default fast model) and any
-//! OpenAI-compatible strong model.
+//! The one OpenAI-compatible chat-completions adapter (SSE streaming), Build Sheet §10 item 8:
+//! Groq (default fast model), Gemini (Groq fallback, via Google's OpenAI-compatible endpoint) and
+//! any OpenAI-compatible strong model. Provider differences are only constructor-set body fields.
+//!
+//! Ollama is deliberately *not* on this adapter; see [`super::ollama`] for why.
 
 use super::{model_id, warm_get};
 use crate::http::{Step, StreamParser, drive};
 use crate::wire::SseDecoder;
 use async_trait::async_trait;
 use serde_json::{Map, Value, json};
+use ssc_core::config::GeminiTier;
 use ssc_core::secrets::Secret;
 use ssc_core::traits::{AnswerModel, Cancel};
 use ssc_core::types::{Prompt, StreamStats, Token};
@@ -14,6 +18,9 @@ use tokio::sync::mpsc;
 
 pub const GROQ_BASE_URL: &str = "https://api.groq.com/openai/v1";
 pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+/// Gemini's OpenAI-compatible endpoint (`Authorization: Bearer <key>`, `POST …/chat/completions`
+/// with `stream: true`). Checked against Google's "OpenAI compatibility" page, 2026-11-17.
+pub const GEMINI_BASE_URL: &str = "https://generativelanguage.googleapis.com/v1beta/openai";
 
 pub struct OpenAiCompat {
     id: String,
@@ -49,6 +56,30 @@ impl OpenAiCompat {
             m.extra.insert("reasoning_format".into(), json!("hidden"));
         }
         m
+    }
+
+    /// Gemini through its OpenAI-compatible endpoint; ids stay `gemini/<model>`.
+    ///
+    /// Privacy rule (spec "Answer models"): the Gemini free tier may use prompts to improve Google
+    /// products, so client call content goes only to the paid tier. Tier is a property of the API
+    /// key's project and can't be detected from a request, so the user declares it; a key declared
+    /// `Free` is refused with [`SscError::Policy`] unless `testing` is set.
+    ///
+    /// Thinking: Google documents `reasoning_effort: "none"` as turning thinking off for 2.5
+    /// models, and says it can't be turned off for 2.5 Pro / Gemini 3+; those get `"low"`, the
+    /// cheapest level every thinking model accepts. First-token latency matters more than depth.
+    pub fn gemini(base_url: &str, model: &str, key: Secret, tier: GeminiTier, testing: bool) -> Result<Self> {
+        if tier == GeminiTier::Free && !testing {
+            return Err(SscError::Policy(
+                "Gemini free tier is for testing only (client calls need the paid tier)".into(),
+            ));
+        }
+        let mut m = Self::new("gemini", base_url, model, key);
+        let lower = model.to_ascii_lowercase();
+        let effort = if lower.contains("2.5") && !lower.contains("pro") { "none" } else { "low" };
+        m.extra.insert("reasoning_effort".into(), json!(effort));
+        m.extra.insert("stream_options".into(), json!({ "include_usage": true }));
+        Ok(m)
     }
 
     pub fn with_extra(mut self, key: &str, value: Value) -> Self {
@@ -100,7 +131,8 @@ impl AnswerModel for OpenAiCompat {
     }
 }
 
-/// `data: {"choices":[{"delta":{"content":"…"}}]}` … `data: [DONE]`.
+/// `data: {"choices":[{"delta":{"content":"…"}}]}` … `data: [DONE]`. Only `delta.content` is
+/// answer text; `reasoning` / `reasoning_content` deltas are ignored.
 #[derive(Default)]
 pub struct ChatSse {
     sse: SseDecoder,
@@ -116,6 +148,11 @@ impl ChatSse {
             }
             let v: Value =
                 serde_json::from_str(&ev.data).map_err(|_| SscError::Unavailable("bad stream frame".into()))?;
+            // Gemini's compatibility layer wraps error frames in a one-element array.
+            let v = match v {
+                Value::Array(a) => a.into_iter().next().unwrap_or(Value::Null),
+                v => v,
+            };
             if let Some(err) = v.get("error") {
                 return Err(stream_error(err));
             }
@@ -131,17 +168,19 @@ impl ChatSse {
     }
 }
 
+/// Map an in-stream error object (`type` / `code` / `status`) without echoing its message.
 pub(crate) fn stream_error(err: &Value) -> SscError {
-    let kind = err
-        .get("type")
-        .or_else(|| err.get("code"))
-        .and_then(Value::as_str)
+    let s = |k: &str| err.get(k).and_then(Value::as_str);
+    let kind = s("type")
+        .or_else(|| s("code"))
+        .or_else(|| s("status"))
         .unwrap_or("error")
         .chars()
         .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
         .take(64)
         .collect::<String>();
-    if kind.contains("rate_limit") {
+    let code = err.get("code").and_then(Value::as_u64);
+    if kind.contains("rate_limit") || kind == "RESOURCE_EXHAUSTED" || code == Some(429) {
         SscError::RateLimited { retry_after_ms: None }
     } else {
         SscError::Unavailable(format!("stream error ({kind})"))
@@ -185,6 +224,7 @@ mod tests {
         assert_eq!(b["max_tokens"], 80);
         assert_eq!(b["reasoning_effort"], "low");
         assert_eq!(b["stop"][0], "\n\n\n");
+        assert!(b.get("stream_options").is_none());
         assert_eq!(m.id(), "groq/openai/gpt-oss-120b");
         let q = OpenAiCompat::groq(GROQ_BASE_URL, "qwen/qwen3-32b", Secret::new("k")).body(&prompt());
         assert_eq!(q["reasoning_format"], "hidden");
@@ -192,7 +232,37 @@ mod tests {
     }
 
     #[test]
-    fn parses_fixture() {
+    fn gemini_free_tier_needs_testing_flag() {
+        let k = || Secret::new("k");
+        let g = |tier, testing| OpenAiCompat::gemini(GEMINI_BASE_URL, "m", k(), tier, testing);
+        assert!(matches!(g(GeminiTier::Free, false), Err(SscError::Policy(_))));
+        assert!(g(GeminiTier::Free, true).is_ok());
+        assert!(g(GeminiTier::Paid, false).is_ok());
+    }
+
+    #[test]
+    fn gemini_body_shape() {
+        let g =
+            OpenAiCompat::gemini(GEMINI_BASE_URL, "gemini-2.5-flash-lite", Secret::new("k"), GeminiTier::Paid, false)
+                .unwrap();
+        assert_eq!(g.id(), "gemini/gemini-2.5-flash-lite");
+        assert_eq!(g.base_url, "https://generativelanguage.googleapis.com/v1beta/openai");
+        let b = g.body(&prompt());
+        assert_eq!(b["model"], "gemini-2.5-flash-lite");
+        assert_eq!(b["messages"][0]["content"], "P");
+        assert_eq!(b["reasoning_effort"], "none");
+        assert_eq!(b["stream_options"]["include_usage"], true);
+        let effort = |m: &str| {
+            OpenAiCompat::gemini(GEMINI_BASE_URL, m, Secret::new("k"), GeminiTier::Paid, false).unwrap().body(&prompt())
+                ["reasoning_effort"]
+                .clone()
+        };
+        assert_eq!(effort("gemini-2.5-pro"), "low", "2.5 Pro can't turn thinking off");
+        assert_eq!(effort("gemini-3-flash"), "low");
+    }
+
+    #[test]
+    fn parses_groq_fixture() {
         let mut p = ChatSse::default();
         let s = p.feed(include_bytes!("../../tests/fixtures/groq_stream.sse")).unwrap();
         assert!(s.done);
@@ -201,9 +271,27 @@ mod tests {
     }
 
     #[test]
-    fn stream_error_frame() {
+    fn parses_gemini_fixture() {
+        let mut p = ChatSse::default();
+        let s = p.feed(include_bytes!("../../tests/fixtures/gemini_stream.sse")).unwrap();
+        assert!(s.done);
+        assert_eq!(s.texts.concat(), "1. Requirements\n2. Design\n3. Build\n---\n1: Ask about users\n");
+        assert_eq!(s.tokens_out, Some(16));
+    }
+
+    #[test]
+    fn stream_error_frames() {
         let mut p = ChatSse::default();
         let e = p.feed(b"data: {\"error\":{\"message\":\"x\",\"type\":\"rate_limit_exceeded\"}}\n\n").unwrap_err();
         assert!(matches!(e, SscError::RateLimited { .. }));
+        let mut p = ChatSse::default();
+        let e = p
+            .feed(b"data: [{\"error\":{\"code\":429,\"message\":\"q\",\"status\":\"RESOURCE_EXHAUSTED\"}}]\n\n")
+            .unwrap_err();
+        assert!(matches!(e, SscError::RateLimited { .. }), "{e:?}");
+        let mut p = ChatSse::default();
+        let e =
+            p.feed(b"data: {\"error\":{\"code\":500,\"message\":\"secret\",\"status\":\"INTERNAL\"}}\n\n").unwrap_err();
+        assert!(matches!(&e, SscError::Unavailable(m) if m.contains("INTERNAL") && !m.contains("secret")), "{e:?}");
     }
 }

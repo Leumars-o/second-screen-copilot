@@ -71,3 +71,10 @@ Format:
 - From: lead (live call, 2026-11-17)
 - What: `models.decision_cloud_base_url` default `https://api.typesafe.ai`; `models.decision_cloud_model` default `jev-1.14.0` (the API rejects `jev-1.14` with `Unknown model`; `jev-latest` resolves to `jev-1.14.0`). Live response matched the documented shape: `{model, answers: {id: {type:"noul", noul} | {type:"choice", choice, confidence, probabilities}}, usage}`; 0.56 s round trip.
 - Status: accepted (contracts-v1.3)
+
+## CR-8 — Default strong model `anthropic/claude-opus-5-5`
+- From: W2-ROUTER
+- What: `models.strong_model` default `Some("anthropic/claude-opus-5-5")` instead of `None`; update the doc comment ("Sonnet-class model … None = disabled") to "strong tier model, provider/model; None = disabled".
+- Why: Build Sheet §10 item 8 and the user rule "best available model everywhere" name Claude Opus 5.5 (native Messages adapter, adaptive thinking, `effort: low`) as the strong model. With `None` the strong tier and the cloud post-call model are off until the user types a model id. The default is safe without a key: `factory::build_strong` returns no strong tier when `api.strong` is missing, and local-only mode never reads it.
+- Proposed diff: `strong_model: Some("anthropic/claude-opus-5-5".into()),` in `impl Default for Models`; `ssc_router::providers::anthropic::DEFAULT_CLAUDE_MODEL` already holds the id. Adjust any ssc-core test that asserts `strong_model.is_none()`.
+- Status: proposed
