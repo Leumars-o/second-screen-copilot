@@ -12,7 +12,7 @@ the automated test that checks it; open defects are change requests in
 | Device keys: PC X25519 identity, paired-phone direction keys + seq counters, ACME account key, LAN TLS private key | Keychain (`device.*`) |
 | Call content: audio, screen text, transcripts, answers, summaries | RAM; text only in `~/.ssc/memory.sqlite` (transcripts only if `keep_transcripts`) |
 | User memory: About Me, profiles, docs, contacts | `~/.ssc/memory.sqlite` |
-| Phone direction keys | PWA `localStorage` |
+| Phone direction keys | PWA IndexedDB, AES-GCM-sealed under a non-extractable WebCrypto key (CR-15) |
 
 Actors: the user; the other party on the call ("them", untrusted — controls speech and often
 screen content); anyone on the same Wi-Fi; any web page open in a browser on the PC or LAN;
@@ -118,8 +118,10 @@ adapters never copy provider error bodies; the settings page can write but never
   `decision_adapter_errors_never_contain_the_key` (ignored).
 - Keychain items use the default macOS ACL (the creating binary). Unsigned dev rebuilds may
   re-prompt; a same-user process that the user approves can read them (out of scope).
-- Phone: direction keys sit in PWA `localStorage`; any script on the PWA origin can read them.
-  **CR-15 (low)**: the static export ships no Content-Security-Policy.
+- Phone: direction keys are sealed in IndexedDB under a non-extractable WebCrypto key and held
+  as raw bytes only in memory (libsodium needs them). A script running on the PWA origin could
+  still use the key handle, so the strict CSP (hashed inline scripts, no `unsafe-eval`,
+  `wasm-unsafe-eval` only for libsodium) is the control. CR-15 fixed.
 
 ## 6. Local-only mode
 
