@@ -1,0 +1,27 @@
+{
+  "model": "jev-1.14",
+  "state": "Last question from the other person:\nHow much is the pro plan?\n\nScreen changes:\nPricing page\n\nProfiles: sales, support",
+  "questions": {
+    "needs_answer": { "type": "noul", "instructions": "Is the other person asking something the user should answer now?" },
+    "intent": {
+      "type": "choice",
+      "instructions": "What is the question about?",
+      "criteria": { "pricing": null, "objection": null, "technical": null, "scheduling": null, "small_talk": null, "none": null }
+    },
+    "answer_tier": {
+      "type": "choice",
+      "instructions": "Which answer does this need: a quick cue, a detailed technical answer, or none?",
+      "criteria": { "fast": null, "strong": null, "none": null }
+    },
+    "profile": {
+      "type": "choice",
+      "instructions": "Which profile's documents are most relevant?",
+      "criteria": { "sales": null, "support": null }
+    },
+    "urgency": {
+      "type": "choice",
+      "instructions": "How urgently does the user need an answer?",
+      "criteria": { "low": null, "medium": null, "high": null }
+    }
+  }
+}

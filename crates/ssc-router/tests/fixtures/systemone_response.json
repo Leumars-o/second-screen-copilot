@@ -1,0 +1,31 @@
+{
+  "model": "jev-1.14",
+  "answers": {
+    "needs_answer": { "type": "noul", "noul": 0.94 },
+    "intent": {
+      "type": "choice",
+      "choice": "pricing",
+      "probabilities": { "pricing": 0.81, "objection": 0.07, "technical": 0.05, "scheduling": 0.03, "small_talk": 0.02, "none": 0.02 },
+      "confidence": 0.78
+    },
+    "answer_tier": {
+      "type": "choice",
+      "choice": "fast",
+      "probabilities": { "fast": 0.72, "strong": 0.2, "none": 0.08 },
+      "confidence": 0.66
+    },
+    "profile": {
+      "type": "choice",
+      "choice": "sales",
+      "probabilities": { "sales": 0.88, "support": 0.12 },
+      "confidence": 0.85
+    },
+    "urgency": {
+      "type": "choice",
+      "choice": "high",
+      "probabilities": { "low": 0.05, "medium": 0.25, "high": 0.7 },
+      "confidence": 0.6
+    }
+  },
+  "usage": { "input_tokens": 212, "output_tokens": 0 }
+}

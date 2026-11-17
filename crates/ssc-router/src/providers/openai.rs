@@ -1,0 +1,209 @@
+//! OpenAI-compatible chat completions with SSE streaming: Groq (default fast model) and any
+//! OpenAI-compatible strong model.
+
+use super::{model_id, warm_get};
+use crate::http::{Step, StreamParser, drive};
+use crate::wire::SseDecoder;
+use async_trait::async_trait;
+use serde_json::{Map, Value, json};
+use ssc_core::secrets::Secret;
+use ssc_core::traits::{AnswerModel, Cancel};
+use ssc_core::types::{Prompt, StreamStats, Token};
+use ssc_core::{Result, SscError};
+use tokio::sync::mpsc;
+
+pub const GROQ_BASE_URL: &str = "https://api.groq.com/openai/v1";
+pub const OPENAI_BASE_URL: &str = "https://api.openai.com/v1";
+
+pub struct OpenAiCompat {
+    id: String,
+    base_url: String,
+    model: String,
+    key: Secret,
+    client: reqwest::Client,
+    /// Provider-specific body fields merged into every request.
+    extra: Map<String, Value>,
+}
+
+impl OpenAiCompat {
+    pub fn new(provider: &str, base_url: &str, model: &str, key: Secret) -> Self {
+        Self {
+            id: model_id(provider, model),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            model: model.to_string(),
+            key,
+            client: crate::http::client(),
+            extra: Map::new(),
+        }
+    }
+
+    /// Groq. Reasoning models are told to think briefly and not stream their reasoning, so the
+    /// first streamed token is answer text. (Parameter names per Groq's docs; verify with `--features live`.)
+    pub fn groq(base_url: &str, model: &str, key: Secret) -> Self {
+        let mut m = Self::new("groq", base_url, model, key);
+        let lower = model.to_ascii_lowercase();
+        if lower.contains("gpt-oss") {
+            m.extra.insert("reasoning_effort".into(), json!("low"));
+            m.extra.insert("include_reasoning".into(), json!(false));
+        } else if lower.contains("qwen") {
+            m.extra.insert("reasoning_format".into(), json!("hidden"));
+        }
+        m
+    }
+
+    pub fn with_extra(mut self, key: &str, value: Value) -> Self {
+        self.extra.insert(key.into(), value);
+        self
+    }
+
+    pub fn body(&self, p: &Prompt) -> Value {
+        let mut b = json!({
+            "model": self.model,
+            "messages": [
+                { "role": "system", "content": p.prefix },
+                { "role": "user", "content": p.dynamic },
+            ],
+            "stream": true,
+            "max_tokens": p.max_tokens,
+            "temperature": p.temperature,
+        });
+        if !p.stop.is_empty() {
+            b["stop"] = json!(p.stop.iter().take(4).collect::<Vec<_>>());
+        }
+        if let Value::Object(o) = &mut b {
+            o.extend(self.extra.clone());
+        }
+        b
+    }
+
+    /// Open the pooled connection (TLS + HTTP/2) ahead of the first answer.
+    pub async fn warm(&self) {
+        warm_get(&self.client, &format!("{}/models", self.base_url), Some(&self.key)).await;
+    }
+}
+
+#[async_trait]
+impl AnswerModel for OpenAiCompat {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    fn is_cloud(&self) -> bool {
+        true
+    }
+    async fn stream(&self, prompt: &Prompt, tx: mpsc::Sender<Token>, cancel: Cancel) -> Result<StreamStats> {
+        let req = self
+            .client
+            .post(format!("{}/chat/completions", self.base_url))
+            .bearer_auth(self.key.expose())
+            .json(&self.body(prompt));
+        drive(&self.id, req, ChatSse::default(), &tx, &cancel).await
+    }
+}
+
+/// `data: {"choices":[{"delta":{"content":"…"}}]}` … `data: [DONE]`.
+#[derive(Default)]
+pub struct ChatSse {
+    sse: SseDecoder,
+}
+
+impl ChatSse {
+    fn events(&mut self, evs: Vec<crate::wire::SseEvent>) -> Result<Step> {
+        let mut step = Step::default();
+        for ev in evs {
+            if ev.data.trim() == "[DONE]" {
+                step.done = true;
+                break;
+            }
+            let v: Value =
+                serde_json::from_str(&ev.data).map_err(|_| SscError::Unavailable("bad stream frame".into()))?;
+            if let Some(err) = v.get("error") {
+                return Err(stream_error(err));
+            }
+            if let Some(t) = v.pointer("/choices/0/delta/content").and_then(Value::as_str) {
+                step.texts.push(t.to_string());
+            }
+            let usage = v.get("usage").filter(|u| !u.is_null()).or_else(|| v.pointer("/x_groq/usage"));
+            if let Some(n) = usage.and_then(|u| u.get("completion_tokens")).and_then(Value::as_u64) {
+                step.tokens_out = Some(n as u32);
+            }
+        }
+        Ok(step)
+    }
+}
+
+pub(crate) fn stream_error(err: &Value) -> SscError {
+    let kind = err
+        .get("type")
+        .or_else(|| err.get("code"))
+        .and_then(Value::as_str)
+        .unwrap_or("error")
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .take(64)
+        .collect::<String>();
+    if kind.contains("rate_limit") {
+        SscError::RateLimited { retry_after_ms: None }
+    } else {
+        SscError::Unavailable(format!("stream error ({kind})"))
+    }
+}
+
+impl StreamParser for ChatSse {
+    fn feed(&mut self, bytes: &[u8]) -> Result<Step> {
+        let evs = self.sse.push(bytes);
+        self.events(evs)
+    }
+    fn finish(&mut self) -> Result<Step> {
+        let evs = self.sse.finish();
+        self.events(evs)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn prompt() -> Prompt {
+        Prompt {
+            prefix: "P".into(),
+            dynamic: "D".into(),
+            max_tokens: 80,
+            temperature: 0.2,
+            stop: vec!["\n\n\n".into()],
+        }
+    }
+
+    #[test]
+    fn groq_body_shape() {
+        let m = OpenAiCompat::groq(GROQ_BASE_URL, "openai/gpt-oss-120b", Secret::new("k"));
+        let b = m.body(&prompt());
+        assert_eq!(b["model"], "openai/gpt-oss-120b");
+        assert_eq!(b["messages"][0]["role"], "system");
+        assert_eq!(b["messages"][0]["content"], "P");
+        assert_eq!(b["messages"][1]["content"], "D");
+        assert_eq!(b["stream"], true);
+        assert_eq!(b["max_tokens"], 80);
+        assert_eq!(b["reasoning_effort"], "low");
+        assert_eq!(b["stop"][0], "\n\n\n");
+        assert_eq!(m.id(), "groq/openai/gpt-oss-120b");
+        let q = OpenAiCompat::groq(GROQ_BASE_URL, "qwen/qwen3-32b", Secret::new("k")).body(&prompt());
+        assert_eq!(q["reasoning_format"], "hidden");
+        assert!(q.get("reasoning_effort").is_none());
+    }
+
+    #[test]
+    fn parses_fixture() {
+        let mut p = ChatSse::default();
+        let s = p.feed(include_bytes!("../../tests/fixtures/groq_stream.sse")).unwrap();
+        assert!(s.done);
+        assert_eq!(s.texts.concat(), "1. Requirements\n2. Design\n3. Build\n---\n1: Ask about users\n");
+        assert_eq!(s.tokens_out, Some(17));
+    }
+
+    #[test]
+    fn stream_error_frame() {
+        let mut p = ChatSse::default();
+        let e = p.feed(b"data: {\"error\":{\"message\":\"x\",\"type\":\"rate_limit_exceeded\"}}\n\n").unwrap_err();
+        assert!(matches!(e, SscError::RateLimited { .. }));
+    }
+}

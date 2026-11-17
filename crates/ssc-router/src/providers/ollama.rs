@@ -1,0 +1,173 @@
+//! Ollama `/api/chat` with NDJSON streaming (Gemma 4 E2B live, Gemma 4 12B post-call).
+//!
+//! Prefix caching: the fixed prompt prefix is always the first (system) message and byte-stable,
+//! so Ollama reuses its KV cache for it; `keep_alive` keeps the model loaded between answers, and
+//! [`Ollama::warm_prefix`] pre-fills the cache before the first question.
+
+use super::{is_loopback_url, model_id};
+use crate::http::{Step, StreamParser, drive};
+use crate::wire::NdjsonDecoder;
+use async_trait::async_trait;
+use serde_json::{Value, json};
+use ssc_core::traits::{AnswerModel, Cancel};
+use ssc_core::types::{Prompt, StreamStats, Token};
+use ssc_core::{Result, SscError};
+use tokio::sync::mpsc;
+
+pub const DEFAULT_KEEP_ALIVE: &str = "30m";
+
+pub struct Ollama {
+    id: String,
+    base_url: String,
+    model: String,
+    keep_alive: String,
+    client: reqwest::Client,
+    local: bool,
+}
+
+impl Ollama {
+    pub fn new(base_url: &str, model: &str) -> Self {
+        Self {
+            id: model_id("ollama", model),
+            base_url: base_url.trim_end_matches('/').to_string(),
+            model: model.to_string(),
+            keep_alive: DEFAULT_KEEP_ALIVE.into(),
+            client: crate::http::client(),
+            local: is_loopback_url(base_url),
+        }
+    }
+
+    pub fn with_keep_alive(mut self, keep_alive: &str) -> Self {
+        self.keep_alive = keep_alive.into();
+        self
+    }
+
+    pub fn body(&self, p: &Prompt) -> Value {
+        let mut options = json!({ "temperature": p.temperature, "num_predict": p.max_tokens });
+        if !p.stop.is_empty() {
+            options["stop"] = json!(p.stop);
+        }
+        json!({
+            "model": self.model,
+            "messages": [
+                { "role": "system", "content": p.prefix },
+                { "role": "user", "content": p.dynamic },
+            ],
+            "stream": true,
+            "keep_alive": self.keep_alive,
+            "options": options,
+        })
+    }
+
+    /// Load the model (empty `messages` loads without generating).
+    pub async fn preload(&self) -> Result<()> {
+        let body = json!({ "model": self.model, "messages": [], "keep_alive": self.keep_alive });
+        let r = self
+            .client
+            .post(format!("{}/api/chat", self.base_url))
+            .json(&body)
+            .send()
+            .await
+            .map_err(|e| crate::http::map_reqwest(e, 0))?;
+        if r.status().is_success() { Ok(()) } else { Err(SscError::Unavailable(format!("http {}", r.status()))) }
+    }
+
+    /// Evaluate `prefix` once (one output token) so the next answer reuses its KV cache.
+    pub async fn warm_prefix(&self, prefix: &str) -> Result<()> {
+        let p = Prompt { prefix: prefix.into(), dynamic: String::new(), max_tokens: 1, temperature: 0.0, stop: vec![] };
+        let (tx, mut rx) = mpsc::channel(8);
+        let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
+        let r = self.stream(&p, tx, Cancel::new()).await.map(|_| ());
+        let _ = drain.await;
+        r
+    }
+}
+
+#[async_trait]
+impl AnswerModel for Ollama {
+    fn id(&self) -> &str {
+        &self.id
+    }
+    /// A non-loopback Ollama host sends data off the PC, so it counts as cloud.
+    fn is_cloud(&self) -> bool {
+        !self.local
+    }
+    async fn stream(&self, prompt: &Prompt, tx: mpsc::Sender<Token>, cancel: Cancel) -> Result<StreamStats> {
+        let req = self.client.post(format!("{}/api/chat", self.base_url)).json(&self.body(prompt));
+        drive(&self.id, req, OllamaNdjson::default(), &tx, &cancel).await
+    }
+}
+
+#[derive(Default)]
+pub struct OllamaNdjson {
+    nd: NdjsonDecoder,
+}
+
+impl OllamaNdjson {
+    fn lines(lines: Vec<String>) -> Result<Step> {
+        let mut step = Step::default();
+        for l in lines {
+            let v: Value = serde_json::from_str(&l).map_err(|_| SscError::Unavailable("bad stream frame".into()))?;
+            if let Some(e) = v.get("error") {
+                let msg = e.as_str().unwrap_or("error");
+                // e.g. "model 'x' not found": the model isn't pulled.
+                let short: String = msg.chars().take(120).collect();
+                return Err(SscError::Unavailable(format!("ollama: {short}")));
+            }
+            if let Some(t) = v.pointer("/message/content").and_then(Value::as_str) {
+                step.texts.push(t.to_string());
+            }
+            if v.get("done").and_then(Value::as_bool) == Some(true) {
+                step.done = true;
+                if let Some(n) = v.get("eval_count").and_then(Value::as_u64) {
+                    step.tokens_out = Some(n as u32);
+                }
+            }
+        }
+        Ok(step)
+    }
+}
+
+impl StreamParser for OllamaNdjson {
+    fn feed(&mut self, bytes: &[u8]) -> Result<Step> {
+        Self::lines(self.nd.push(bytes))
+    }
+    fn finish(&mut self) -> Result<Step> {
+        Self::lines(self.nd.finish().into_iter().collect())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn body_keeps_prefix_first_and_keep_alive() {
+        let o = Ollama::new("http://127.0.0.1:11434/", "gemma4:e2b");
+        let p = Prompt { prefix: "FIXED".into(), dynamic: "Q".into(), max_tokens: 60, temperature: 0.2, stop: vec![] };
+        let b = o.body(&p);
+        assert_eq!(b["messages"][0]["role"], "system");
+        assert_eq!(b["messages"][0]["content"], "FIXED");
+        assert_eq!(b["keep_alive"], DEFAULT_KEEP_ALIVE);
+        assert_eq!(b["options"]["num_predict"], 60);
+        assert!(!o.is_cloud());
+        assert_eq!(o.id(), "ollama/gemma4:e2b");
+        assert!(Ollama::new("http://10.0.0.5:11434", "m").is_cloud());
+    }
+
+    #[test]
+    fn parses_fixture() {
+        let mut p = OllamaNdjson::default();
+        let s = p.feed(include_bytes!("../../tests/fixtures/ollama_chat.ndjson")).unwrap();
+        assert!(s.done);
+        assert_eq!(s.texts.concat(), "1. Requirements\n2. Design\n3. Build\n---\n1: Ask about users\n");
+        assert_eq!(s.tokens_out, Some(15));
+    }
+
+    #[test]
+    fn error_line() {
+        let mut p = OllamaNdjson::default();
+        let e = p.feed(b"{\"error\":\"model 'gemma4:e2b' not found\"}\n").unwrap_err();
+        assert!(matches!(e, SscError::Unavailable(m) if m.contains("not found")));
+    }
+}
