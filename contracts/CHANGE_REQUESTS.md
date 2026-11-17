@@ -85,3 +85,46 @@ Format:
 - Why: the A-record/ACME code finds the zone with `GET /zones?name=…`, which needs Zone→Zone→Read. A token scoped to Zone→DNS→Edit only cannot list zones, so the user must be able to give the zone id instead.
 - Proposed diff: the field above; `ssc_transport::lan_tls::LanTlsOptions::zone_id` is then filled from it. Until then the stub (`// CR-9`) reads `$SSC_CLOUDFLARE_ZONE_ID`.
 - Status: proposed
+
+## CR-10 — Jev/TypeSafe adapter copies the provider's error message into its error
+- From: W2-HARDEN. Severity: **low**. Owner: W1-MODELS (`crates/ssc-router`).
+- What: `crates/ssc-router/src/decision/mod.rs:75` wraps every non-2xx in `with_detail` (`:90`), which appends the body's `detail.message` / `error.message` (160 chars) to the `SscError`. A provider that echoes the key ("Incorrect API key provided: sk-…") or the request text puts it in the error string; with redaction off, the question is unredacted.
+- Why it matters: error strings are logged and shown in the settings UI. Today `ssc-trigger` discards decision errors, so nothing leaks yet; the next `log(e)` would.
+- Failing test: `crates/ssc-router/tests/security_router.rs::decision_adapter_errors_never_contain_the_key` (`#[ignore = "CR-10"]`).
+- Proposed fix: keep only the sanitised `error_type`/`code` (as `http::map_status` already does), or scrub the message: drop it unless it matches a short allowlist (`Unknown model: <id>`), and never include it for 401/403.
+- Status: open
+
+## CR-11 — Replay window persisted at most once a second: replays accepted after a crash
+- From: W2-HARDEN. Severity: **low**. Owner: W1-PIPE (`crates/ssc-transport`).
+- What: `crates/ssc-transport/src/core.rs:412` (`maybe_persist`) hands the device record (with `last_recv`) to the keychain writer only when a seq block is reserved or ≥1 s after the last write (`:419`), while frames are delivered at once (`:325`). After a crash/kill, the PC restarts with a stale window and accepts again any phone frame recorded in that last second (e.g. a relay operator replaying `memory.delete` / `contact.confirm`).
+- Failing test: `crates/ssc-transport/tests/security_link.rs::replay_window_is_persisted_before_frames_are_delivered` (`#[ignore = "CR-11"]`).
+- Proposed fix: before delivering any non-heartbeat frame, persist `last_recv` (commands are rare, so one keychain write per command is cheap), or reserve the receive window like the send side: persist `last_recv + W` and, after a restart, drop frames below the persisted mark until the peer's seq passes it.
+- Status: open
+
+## CR-12 — LAN socket slots: no auth deadline and no Origin check
+- From: W2-HARDEN. Severity: **medium** (availability only; the relay path still works). Owner: W1-PIPE (`crates/ssc-transport`).
+- What: `crates/ssc-transport/src/ws.rs:19,82` allow 8 sockets; an unauthenticated socket is only closed after `dead_after` (15 s, `core.rs:340`) or 8 bad frames. `ws.rs:105,114` accept the upgrade from any `Origin`. WebSockets are not subject to CORS, so any web page open in a browser on the PC or the Wi-Fi (no LAN foothold needed) can keep all 8 slots busy and lock the paired phone out of the LAN path.
+- Failing tests: `crates/ssc-transport/tests/security_link.rs::idle_unauthenticated_sockets_cannot_lock_out_the_phone`, `::cross_origin_browser_upgrades_are_refused` (both `#[ignore = "CR-12"]`).
+- Proposed fix: (1) in the upgrade callback, refuse any `Origin` other than the PWA's origin (configurable; a native client sends none); (2) give unauthenticated sockets a short deadline (≈3 s to the first valid frame or `pair.hello`) and, when slots are full, evict the oldest unauthenticated socket instead of refusing the newcomer.
+- Status: open
+
+## CR-13 — Cloudflare client takes over A records it did not create (incl. the zone apex)
+- From: W2-HARDEN. Severity: **medium**. Owner: W2-LANTLS / W1-PIPE (`crates/ssc-transport/src/lan_tls`).
+- What: `crates/ssc-transport/src/lan_tls/cloudflare.rs:149` (`upsert_a`) re-points any single existing `A` record with the configured name (`:160`). `normalize_domain` (`lan_tls/mod.rs:154`) accepts the bare zone. A typo in `lan_domain`, or setting it to `example.com` / `www.example.com`, silently points the user's website at a private LAN IP.
+- Failing test: `crates/ssc-transport/tests/security_link.rs::refuses_to_repoint_records_it_does_not_own` (`#[ignore = "CR-13"]`; covers the apex and a foreign record).
+- Proposed fix: mark records the agent creates (Cloudflare record `comment`, e.g. `managed-by: second-screen-copilot <pc-id>`) and update only records carrying that marker; refuse (touch nothing, clear error) when an unmarked record exists. Refuse a `lan_domain` equal to the zone name. The existing `proxied_record_is_switched_to_dns_only` test then needs a marked record.
+- Status: open
+
+## CR-14 — Local-only mode still calls the Cloudflare API and Let's Encrypt
+- From: W2-HARDEN. Severity: **low** (metadata, not call content). Owner: W2-INTEGRATE (`crates/ssc-pipeline/src/transport.rs`) or W1-PIPE.
+- What: `crates/ssc-pipeline/src/transport.rs:95` always spawns `LanTlsManager`, which (`lan_tls/mod.rs:200` onward) reads the Cloudflare token, publishes the LAN IP in the A record and orders certificates even when `mode = local`. The spec promises that in local mode "nothing leaves the PC except encrypted frames to the phone".
+- Failing test: `crates/ssc-transport/tests/security_link.rs::local_only_mode_makes_no_cloudflare_or_acme_calls` (`#[ignore = "CR-14"]`).
+- Proposed fix: in local-only mode, serve a still-valid cached certificate but make no Cloudflare/ACME call (manager checks `cfg.mode`); offer an explicit settings toggle "allow DNS/certificate upkeep in local-only mode" and show the consequence (plain `ws://` LAN is blocked by the HTTPS PWA, so the phone would use the relay) in the settings UI.
+- Status: open
+
+## CR-15 — PWA has no Content-Security-Policy while holding the direction keys in localStorage
+- From: W2-HARDEN. Severity: **low** (defence in depth; no injection sink found). Owner: W1-PHONE (`apps/phone`).
+- What: `apps/phone/src/lib/connection.ts:1,40` keep the pairing (both direction keys) in `localStorage`; `apps/phone/next.config.ts` (static export) and `app/layout.tsx` set no CSP, so any script that ever runs on the PWA origin (a compromised dependency, a future HTML sink) can read the keys and decrypt or forge frames.
+- Failing test: none (outside HARDEN's test paths); checked by reading the files.
+- Proposed fix: add `<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self' wss: ws:; script-src 'self'; object-src 'none'; base-uri 'none'">` (plus the hashes Next needs for its inline bootstrap) and a Playwright check that it is present; consider storing the keys as non-extractable WebCrypto keys in IndexedDB.
+- Status: open
