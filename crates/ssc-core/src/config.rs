@@ -137,7 +137,7 @@ impl Default for Models {
             // Verified live 2026-11-17: `jev-1.14` is rejected; `jev-latest` resolves to `jev-1.14.0`.
             decision_cloud_base_url: "https://api.typesafe.ai".into(),
             decision_cloud_model: "jev-1.14.0".into(),
-            decision_local_model: "tev1:4b".into(),  // verify
+            decision_local_model: "tev1:4b".into(), // verify
             gemini_tier: GeminiTier::Paid,
             strong_base_url: None,
         }
