@@ -33,6 +33,8 @@ pub struct Config {
     /// CR-4/CR-6: public host name whose DNS-only A record points at this PC's LAN IP, served as
     /// `wss://<lan_domain>:<lan_port>` with a Let's Encrypt certificate. None = self-signed / plain LAN.
     pub lan_domain: Option<String>,
+    /// CR-9: Cloudflare zone id of `lan_domain`'s zone, for tokens without Zone:Read. None = look it up.
+    pub lan_zone_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -48,7 +50,7 @@ pub struct Hotkeys {
 pub struct Models {
     pub groq_model: String,
     pub gemini_model: String,
-    /// Optional Sonnet-class model for the strong tier, "provider/model". None = disabled.
+    /// Strong-tier model, "provider/model". None = disabled.
     pub strong_model: Option<String>,
     pub ollama_url: String,
     pub local_answer_model: String,
@@ -111,6 +113,7 @@ impl Default for Config {
             testing: false,
             redact_emails: false,
             lan_domain: None,
+            lan_zone_id: None,
         }
     }
 }
@@ -130,7 +133,8 @@ impl Default for Models {
         Self {
             groq_model: "openai/gpt-oss-120b".into(),     // verify
             gemini_model: "gemini-2.5-flash-lite".into(), // verify
-            strong_model: None,
+            // CR-8: off unless the `api.strong` key exists (the factory builds no strong tier without it).
+            strong_model: Some("anthropic/claude-opus-5-5".into()),
             ollama_url: "http://127.0.0.1:11434".into(),
             local_answer_model: "gemma4:e2b".into(),   // verify
             local_postcall_model: "gemma4:12b".into(), // verify

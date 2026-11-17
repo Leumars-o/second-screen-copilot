@@ -77,14 +77,14 @@ Format:
 - What: `models.strong_model` default `Some("anthropic/claude-opus-5-5")` instead of `None`; update the doc comment ("Sonnet-class model … None = disabled") to "strong tier model, provider/model; None = disabled".
 - Why: Build Sheet §10 item 8 and the user rule "best available model everywhere" name Claude Opus 5.5 (native Messages adapter, adaptive thinking, `effort: low`) as the strong model. With `None` the strong tier and the cloud post-call model are off until the user types a model id. The default is safe without a key: `factory::build_strong` returns no strong tier when `api.strong` is missing, and local-only mode never reads it.
 - Proposed diff: `strong_model: Some("anthropic/claude-opus-5-5".into()),` in `impl Default for Models`; `ssc_router::providers::anthropic::DEFAULT_CLAUDE_MODEL` already holds the id. Adjust any ssc-core test that asserts `strong_model.is_none()`.
-- Status: proposed
+- Status: accepted (contracts-v1.4)
 
 ## CR-9 — Optional Cloudflare zone id for the CR-4 LAN domain
 - From: W2-LANTLS
 - What: add `Config.lan_zone_id: Option<String>` (`#[serde(default)]`), the Cloudflare zone id of `lan_domain`'s zone.
 - Why: the A-record/ACME code finds the zone with `GET /zones?name=…`, which needs Zone→Zone→Read. A token scoped to Zone→DNS→Edit only cannot list zones, so the user must be able to give the zone id instead.
 - Proposed diff: the field above; `ssc_transport::lan_tls::LanTlsOptions::zone_id` is then filled from it. Until then the stub (`// CR-9`) reads `$SSC_CLOUDFLARE_ZONE_ID`.
-- Status: proposed
+- Status: accepted (contracts-v1.4); the transport should read `cfg.lan_zone_id` and keep `SSC_CLOUDFLARE_ZONE_ID` only as an override.
 
 ## CR-10 — Jev/TypeSafe adapter copies the provider's error message into its error
 - From: W2-HARDEN. Severity: **low**. Owner: W1-MODELS (`crates/ssc-router`).
