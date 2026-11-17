@@ -1,0 +1,88 @@
+{
+  "_note": "Labelled retrieval set for W1-MEMORY. Queries are phrased the way a caller would ask, not copied from the docs. A hit is any top-5 chunk of the target profile containing `expect`. MockEmbedder is bag-of-words, so this measures the store/index/ranking plumbing on lexical overlap; semantic quality is measured with the fastembed feature.",
+  "profile": "acme-sales",
+  "docs": {
+    "pricing.md": [
+      "# Pricing\nThe Starter plan costs 29 dollars per user per month, billed monthly, and includes up to 10 seats.",
+      "The Business plan costs 79 dollars per user per month and adds SSO, audit logs and priority email support.",
+      "Enterprise pricing is custom. Enterprise contracts start at 45,000 dollars per year with a minimum of 200 seats.",
+      "Annual billing gives a 20 percent discount on Starter and Business. Discounts are applied at checkout.",
+      "Nonprofits and schools receive a 50 percent education discount after verification of their status.",
+      "Refunds: customers can cancel within 30 days for a full refund. After 30 days no refunds are issued, but the subscription can be cancelled at renewal.",
+      "Overage: additional API calls above the quota are billed at 2 dollars per thousand requests.",
+      "Payment methods accepted are credit card, ACH bank transfer and wire for invoices above 10,000 dollars."
+    ],
+    "security.md": [
+      "# Security\nAll customer data is encrypted at rest with AES-256 and in transit with TLS 1.3.",
+      "We are SOC 2 Type II certified. The latest audit report is available under NDA from the trust portal.",
+      "Single sign-on supports SAML 2.0 and OpenID Connect with Okta, Azure AD and Google Workspace.",
+      "SCIM provisioning automatically creates and removes user accounts when people join or leave.",
+      "Data residency: customers can choose hosting regions in the EU (Frankfurt) or the US (Virginia).",
+      "Backups run every 6 hours and are retained for 35 days. Recovery point objective is 6 hours.",
+      "Penetration tests are performed twice a year by an independent firm, and results are summarised for customers.",
+      "GDPR: we sign a data processing agreement and list every subprocessor on our website."
+    ],
+    "product.txt": [
+      "The dashboard shows live metrics for every pipeline, refreshed every five seconds.",
+      "Integrations include Salesforce, HubSpot, Slack, Zendesk and Snowflake out of the box.",
+      "The public REST API has a rate limit of 600 requests per minute per workspace.",
+      "Webhooks notify your systems when a pipeline fails, with automatic retries for 24 hours.",
+      "The mobile app for iOS and Android lets managers approve workflows on the go.",
+      "Custom roles let admins define granular permissions for viewers, editors and owners.",
+      "Uptime SLA is 99.9 percent for Business and 99.95 percent for Enterprise, with service credits if missed.",
+      "The workflow builder is drag-and-drop and needs no code; advanced users can add Python steps."
+    ],
+    "onboarding.md": [
+      "# Onboarding\nImplementation takes two to four weeks with a dedicated onboarding engineer.",
+      "Data migration from legacy tools is included for Enterprise; Business customers get migration templates.",
+      "Training: we run three live training sessions for admins and record them for later viewing.",
+      "Support hours are 8am to 8pm Eastern, Monday to Friday. Enterprise gets 24/7 phone support.",
+      "Every Enterprise account gets a named customer success manager and quarterly business reviews.",
+      "A free trial lasts 14 days with full Business features and no credit card required.",
+      "Sandbox environments for testing are available on Enterprise at no extra cost."
+    ]
+  },
+  "distractors": {
+    "profile": "bank-support",
+    "docs": {
+      "bank-faq.md": [
+        "Card pricing: the premium debit card costs 5 dollars per month. Refunds for card fees take 5 business days.",
+        "Security: the bank app uses fingerprint login. Encrypted messages reach support within one hour.",
+        "Support hours for the bank are 24/7 by phone. The mobile app supports iOS and Android.",
+        "Enterprise banking accounts have a dedicated relationship manager and custom pricing."
+      ]
+    }
+  },
+  "queries": [
+    {"q": "How much is the starter plan per month?", "expect": "Starter plan costs 29"},
+    {"q": "What does business cost and does it include SSO?", "expect": "Business plan costs 79"},
+    {"q": "What's the enterprise price per year?", "expect": "Enterprise contracts start at 45,000"},
+    {"q": "Is there a discount if we pay annually?", "expect": "Annual billing gives a 20 percent"},
+    {"q": "Do you have an education discount for schools?", "expect": "education discount"},
+    {"q": "Can we get a refund if we cancel?", "expect": "full refund"},
+    {"q": "What happens if we go over the API quota?", "expect": "Overage"},
+    {"q": "Can we pay by wire transfer or ACH?", "expect": "Payment methods accepted"},
+    {"q": "Is our data encrypted at rest?", "expect": "AES-256"},
+    {"q": "Are you SOC 2 certified? Can we see the audit report?", "expect": "SOC 2 Type II"},
+    {"q": "Do you support SAML single sign-on with Okta?", "expect": "SAML 2.0"},
+    {"q": "Does SCIM provisioning remove users automatically?", "expect": "SCIM provisioning"},
+    {"q": "Can we host our data in the EU?", "expect": "Data residency"},
+    {"q": "How often do backups run and how long are they retained?", "expect": "Backups run every 6 hours"},
+    {"q": "Do you do penetration tests?", "expect": "Penetration tests"},
+    {"q": "Will you sign a GDPR data processing agreement?", "expect": "GDPR"},
+    {"q": "How often does the dashboard refresh metrics?", "expect": "live metrics"},
+    {"q": "Do you integrate with Salesforce and Snowflake?", "expect": "Integrations include Salesforce"},
+    {"q": "What's the rate limit on the REST API?", "expect": "rate limit of 600"},
+    {"q": "Do webhooks retry when a pipeline fails?", "expect": "Webhooks notify"},
+    {"q": "Is there a mobile app for managers?", "expect": "approve workflows on the go"},
+    {"q": "Can admins create custom roles and permissions?", "expect": "Custom roles"},
+    {"q": "What uptime SLA do you offer for enterprise?", "expect": "Uptime SLA"},
+    {"q": "Does the workflow builder need code?", "expect": "drag-and-drop"},
+    {"q": "How long does implementation take?", "expect": "Implementation takes two to four weeks"},
+    {"q": "Is data migration from our legacy tools included?", "expect": "Data migration from legacy tools"},
+    {"q": "Do you run training sessions for admins?", "expect": "live training sessions"},
+    {"q": "What are your support hours?", "expect": "Support hours are 8am"},
+    {"q": "Do we get a customer success manager?", "expect": "customer success manager"},
+    {"q": "Is there a free trial and do you need a credit card?", "expect": "free trial lasts 14 days"}
+  ]
+}
