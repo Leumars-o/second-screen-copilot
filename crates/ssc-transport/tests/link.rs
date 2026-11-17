@@ -152,7 +152,7 @@ async fn drops_tampered_replayed_and_wrong_direction_frames() {
     let t = start(test_config(), pc, Some(dev.clone())).await;
     let mut incoming = t.take_incoming().unwrap();
     let mut ph = FakePhone::from_device(&dev);
-    ph.lan = Some(ws_connect(t.lan_url()).await);
+    ph.lan = Some(ws_connect(&t.lan_url()).await);
 
     let a = Uuid::new_v4();
     let (e1, w1) = ph.seal(None, Message::Command(Cmd::Pin { answer_id: a }));
@@ -179,7 +179,7 @@ async fn batches_answer_deltas() {
     let (pc, _phone, dev) = prepaired();
     let t = start(test_config(), pc, Some(dev.clone())).await;
     let mut ph = FakePhone::from_device(&dev);
-    ph.lan = Some(ws_connect(t.lan_url()).await);
+    ph.lan = Some(ws_connect(&t.lan_url()).await);
     ph.send(P::Lan, None, Message::Heartbeat(Heartbeat { echo: Some(0) })).await; // mark LAN live
     wait_for(&t, "lan live", |s| s.phone_live).await;
 
@@ -232,7 +232,7 @@ async fn heartbeats_measure_rtt_and_dead_links_close() {
     };
     let t = start(cfg, pc, Some(dev.clone())).await;
     let mut ph = FakePhone::from_device(&dev);
-    ph.lan = Some(ws_connect(t.lan_url()).await);
+    ph.lan = Some(ws_connect(&t.lan_url()).await);
 
     // Phone heartbeat without echo -> PC answers at once with echo = our ts.
     let sent = ph.send(P::Lan, None, Message::Heartbeat(Heartbeat::default())).await;
@@ -276,7 +276,7 @@ async fn falls_back_to_relay_when_lan_dies_and_back() {
     // PC's relay socket comes up in the device's room.
     wait_for(&t, "relay up", |s| s.path == Some(LinkPath::Relay)).await;
     ph.relay = Some(ws_connect(&format!("{}/r/{}", relay.url(), dev.room_id)).await);
-    ph.lan = Some(ws_connect(t.lan_url()).await);
+    ph.lan = Some(ws_connect(&t.lan_url()).await);
     ph.send(P::Lan, None, Message::Heartbeat(Heartbeat { echo: Some(0) })).await;
     wait_for(&t, "lan preferred", |s| s.path == Some(LinkPath::Lan)).await;
 
@@ -297,7 +297,7 @@ async fn falls_back_to_relay_when_lan_dies_and_back() {
     assert!(*relay.forwarded.lock().unwrap() >= relayed_before + 2);
 
     // LAN comes back: the phone's first LAN frame moves the PC back to LAN.
-    ph.lan = Some(ws_connect(t.lan_url()).await);
+    ph.lan = Some(ws_connect(&t.lan_url()).await);
     ph.send(P::Lan, None, Message::Heartbeat(Heartbeat { echo: Some(0) })).await;
     wait_for(&t, "back on lan", |s| s.path == Some(LinkPath::Lan)).await;
     t.send(None, answer_start(a)).await.unwrap();
@@ -327,7 +327,7 @@ async fn re_pairing_cuts_off_the_previous_phone() {
     let (pc, _phone, dev) = prepaired();
     let t = start(test_config(), pc, Some(dev.clone())).await;
     let mut old = FakePhone::from_device(&dev);
-    old.lan = Some(ws_connect(t.lan_url()).await);
+    old.lan = Some(ws_connect(&t.lan_url()).await);
     old.send(P::Lan, None, Message::Heartbeat(Heartbeat { echo: Some(0) })).await;
     wait_for(&t, "old phone live", |s| s.phone_live).await;
 
@@ -372,7 +372,7 @@ async fn seq_is_per_pairing_and_survives_restart() {
     assert_eq!(first.counters.next_send, 1 + ssc_crypto::frame::SEQ_RESERVE_BLOCK);
 
     let mut ph = FakePhone::from_device(&dev);
-    ph.lan = Some(ws_connect(t.lan_url()).await);
+    ph.lan = Some(ws_connect(&t.lan_url()).await);
     ph.send(P::Lan, None, Message::Heartbeat(Heartbeat { echo: Some(0) })).await;
     wait_for(&t, "live", |s| s.phone_live).await;
     let n = ssc_crypto::frame::SEQ_RESERVE_BLOCK + 5;
@@ -395,7 +395,7 @@ async fn seq_is_per_pairing_and_survives_restart() {
     drop(t);
     let pc = Identity::from_secret_b64(&pc_secret).unwrap();
     let t2 = start(test_config(), pc, Some(latest.clone())).await;
-    ph.lan = Some(ws_connect(t2.lan_url()).await);
+    ph.lan = Some(ws_connect(&t2.lan_url()).await);
     ph.send(P::Lan, None, Message::Heartbeat(Heartbeat { echo: Some(0) })).await;
     wait_for(&t2, "live", |s| s.phone_live).await;
     t2.send(None, answer_start(Uuid::new_v4())).await.unwrap();

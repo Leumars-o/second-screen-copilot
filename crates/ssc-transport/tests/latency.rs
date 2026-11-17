@@ -54,7 +54,7 @@ async fn loopback_round_trip_p95_under_20ms() {
     let t = start(test_config(), pc, Some(dev.clone())).await;
     let mut incoming = t.take_incoming().unwrap();
     let mut ph = FakePhone::from_device(&dev);
-    ph.lan = Some(ws_connect(t.lan_url()).await);
+    ph.lan = Some(ws_connect(&t.lan_url()).await);
 
     let mut best = Duration::MAX;
     for _ in 0..3 {

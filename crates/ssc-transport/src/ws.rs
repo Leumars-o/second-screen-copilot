@@ -3,12 +3,13 @@
 
 use crate::core::{Cmd, ConnOut, LinkPath};
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::{Semaphore, mpsc, watch};
+use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message as WsMessage;
 use tokio_tungstenite::tungstenite::protocol::WebSocketConfig;
@@ -72,6 +73,7 @@ pub(crate) async fn run_conn<S>(
 
 pub(crate) async fn lan_server(
     listener: TcpListener,
+    tls: Arc<RwLock<Option<TlsAcceptor>>>,
     cmd_tx: mpsc::Sender<Cmd>,
     ids: Arc<AtomicU64>,
     max_frame: usize,
@@ -93,11 +95,28 @@ pub(crate) async fn lan_server(
         let _ = tcp.set_nodelay(true);
         let (cmd_tx, cancel) = (cmd_tx.clone(), cancel.child_token());
         let id = ids.fetch_add(1, Ordering::Relaxed);
+        // CR-4: plain or TLS is fixed per socket when it is accepted.
+        let acceptor = tls.read().expect("lock").clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let hs = tokio_tungstenite::accept_async_with_config(tcp, Some(ws_config(max_frame)));
-            if let Ok(Ok(ws)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, hs).await {
-                run_conn(ws, id, LinkPath::Lan, cmd_tx, cancel).await;
+            let cfg = Some(ws_config(max_frame));
+            match acceptor {
+                None => {
+                    let hs = tokio_tungstenite::accept_async_with_config(tcp, cfg);
+                    if let Ok(Ok(ws)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, hs).await {
+                        run_conn(ws, id, LinkPath::Lan, cmd_tx, cancel).await;
+                    }
+                }
+                Some(acceptor) => {
+                    // TLS and the WebSocket upgrade share one deadline.
+                    let hs = async move {
+                        let stream = acceptor.accept(tcp).await.ok()?;
+                        tokio_tungstenite::accept_async_with_config(stream, cfg).await.ok()
+                    };
+                    if let Ok(Some(ws)) = tokio::time::timeout(HANDSHAKE_TIMEOUT, hs).await {
+                        run_conn(ws, id, LinkPath::Lan, cmd_tx, cancel).await;
+                    }
+                }
             }
         });
     }

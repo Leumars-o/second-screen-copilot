@@ -96,11 +96,16 @@ impl FakePhone {
     /// Scan `qr`, connect to `qr.urls[url_index]`, send `pair.hello`, expect the sealed
     /// confirmation heartbeat.
     pub async fn pair(qr: &QrPayload, url_index: usize, phone: &Identity) -> Self {
+        let ws = ws_connect(&qr.urls[url_index]).await;
+        Self::pair_on(qr, ws, url_index, phone).await
+    }
+
+    /// [`Self::pair`] on an already connected socket (e.g. `wss://` to a name tests can't resolve).
+    pub async fn pair_on(qr: &QrPayload, mut ws: Ws, url_index: usize, phone: &Identity) -> Self {
         let token: [u8; 32] = b64_array(&qr.token).unwrap();
         let pc_pub: [u8; 32] = b64_array(&qr.pc_pub).unwrap();
         let shared = phone.shared_secret(&pc_pub).unwrap();
         let mut me = Self::new(&SessionKeys::derive(&shared, &token));
-        let mut ws = ws_connect(&qr.urls[url_index]).await;
         ws.send(WsMessage::Binary(hello_bytes(phone, &token, "Pixel").into())).await.unwrap();
         let p = if url_index == 0 { P::Lan } else { P::Relay };
         match p {

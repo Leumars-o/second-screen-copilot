@@ -1,7 +1,8 @@
 //! `ssc-transport`: the PC end of the encrypted phone link (Build Sheet §4.3, W1-PIPE).
 //!
 //! [`PcTransport`] implements [`ssc_core::traits::Transport`]:
-//! - LAN WebSocket server (`ws://<lan-ip>:<port>`), advertised over mDNS as `_ssc._tcp`.
+//! - LAN WebSocket server (`ws://<lan-ip>:<port>`), advertised over mDNS as `_ssc._tcp`; or, with
+//!   CR-4 [`lan_tls`], `wss://<lan_domain>:<port>` with a Let's Encrypt certificate.
 //! - Relay client (`<relay>/r/<room>`), always connected when a relay is configured, used when
 //!   the phone is not reachable on the LAN. Frames are opaque to the relay.
 //! - LAN preferred, relay fallback, transparently (see `core` module docs).
@@ -25,10 +26,14 @@
 
 mod batch;
 mod core;
+pub mod lan_tls;
 pub mod mdns;
 mod ws;
 
 pub use crate::core::LinkPath;
+pub use crate::lan_tls::{
+    LanTls, LanTlsError, LanTlsHandle, LanTlsManager, LanTlsOptions, LanTlsStatus, ensure_lan_tls,
+};
 
 use async_trait::async_trait;
 use ssc_core::protocol::{Envelope, Message, QrPayload};
@@ -61,6 +66,10 @@ pub struct TransportConfig {
     pub batch_chars: usize,
     /// Largest wire frame (the relay drops frames over 64 KB).
     pub max_frame: usize,
+    /// CR-4: serve the LAN socket as `wss://<domain>:<port>` with this certificate from the
+    /// start (see [`ensure_lan_tls`]). It can also be switched on, renewed or off later through
+    /// [`PcTransport::lan_tls_handle`]. `None` = plain `ws://`.
+    pub lan_tls: Option<LanTls>,
 }
 
 impl Default for TransportConfig {
@@ -75,6 +84,7 @@ impl Default for TransportConfig {
             batch_window: Duration::from_millis(50),
             batch_chars: 32,
             max_frame: 64 * 1024,
+            lan_tls: None,
         }
     }
 }
@@ -111,7 +121,7 @@ pub struct PcTransport {
     status: Arc<Mutex<LinkStatus>>,
     has_device: Arc<AtomicBool>,
     local_addr: SocketAddr,
-    lan_url: String,
+    tls: lan_tls::LanTlsHandle,
     max_frame: usize,
     cancel: CancellationToken,
     _mdns: Option<mdns::MdnsAdvert>,
@@ -138,7 +148,10 @@ impl PcTransport {
             if local_addr.ip().is_loopback() { local_addr.ip() } else { detect_lan_ip().unwrap_or(local_addr.ip()) }
                 .to_string()
         });
-        let lan_url = format!("ws://{host}:{}", local_addr.port());
+        let tls = lan_tls::LanTlsHandle::new(format!("ws://{host}:{}", local_addr.port()), local_addr.port());
+        if let Some(t) = &cfg.lan_tls {
+            tls.set(Some(t)).map_err(|e| SscError::Invalid(e.to_string()))?;
+        }
 
         let cancel = CancellationToken::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(4096);
@@ -154,7 +167,7 @@ impl PcTransport {
             identity,
             device,
             clock,
-            lan_url.clone(),
+            tls.lan_url.clone(),
             incoming_tx,
             device_tx,
             room_tx,
@@ -162,7 +175,14 @@ impl PcTransport {
             has_device.clone(),
         );
         tokio::spawn(core.run(cmd_rx, cancel.clone()));
-        tokio::spawn(ws::lan_server(listener, cmd_tx.clone(), ids.clone(), cfg.max_frame, cancel.child_token()));
+        tokio::spawn(ws::lan_server(
+            listener,
+            tls.acceptor.clone(),
+            cmd_tx.clone(),
+            ids.clone(),
+            cfg.max_frame,
+            cancel.child_token(),
+        ));
         if let Some(relay) = cfg.relay_url.clone() {
             tokio::spawn(ws::relay_client(relay, room_rx, cmd_tx.clone(), ids, cfg.max_frame, cancel.child_token()));
         }
@@ -179,7 +199,7 @@ impl PcTransport {
             status,
             has_device,
             local_addr,
-            lan_url,
+            tls,
             max_frame: cfg.max_frame,
             cancel,
             _mdns: mdns,
@@ -190,9 +210,15 @@ impl PcTransport {
         self.local_addr
     }
 
-    /// The LAN URL put in QR codes.
-    pub fn lan_url(&self) -> &str {
-        &self.lan_url
+    /// The LAN URL put in QR codes: `wss://<lan_domain>:<port>` while LAN TLS is active, else
+    /// `ws://<lan-ip>:<port>`.
+    pub fn lan_url(&self) -> String {
+        self.tls.lan_url()
+    }
+
+    /// Switch LAN TLS on (or renew it) / off at runtime; give it to [`LanTlsManager::spawn`].
+    pub fn lan_tls_handle(&self) -> LanTlsHandle {
+        self.tls.clone()
     }
 
     /// Arm a new one-time pairing offer (valid 120 s) and return its QR payload. Render it with
@@ -268,17 +294,73 @@ impl Transport for PcTransport {
     }
 }
 
-/// First private (RFC 1918) IPv4 address of an up, non-loopback interface; else any
-/// non-loopback, non-link-local IPv4.
+/// The PC's LAN address, see [`detect_lan_ipv4`].
 pub fn detect_lan_ip() -> Option<IpAddr> {
+    detect_lan_ipv4().map(IpAddr::V4)
+}
+
+/// Best LAN IPv4 of the machine's interfaces (see [`pick_lan_ipv4`]).
+pub fn detect_lan_ipv4() -> Option<Ipv4Addr> {
     let ifs = if_addrs::get_if_addrs().ok()?;
-    let v4: Vec<Ipv4Addr> = ifs
+    let v4: Vec<(String, Ipv4Addr)> = ifs
         .iter()
-        .filter(|i| !i.is_loopback() && !i.is_link_local())
         .filter_map(|i| match i.ip() {
-            IpAddr::V4(a) => Some(a),
+            IpAddr::V4(a) => Some((i.name.clone(), a)),
             IpAddr::V6(_) => None,
         })
         .collect();
-    v4.iter().find(|a| a.is_private()).or(v4.first()).map(|a| IpAddr::V4(*a))
+    pick_lan_ipv4(&v4)
+}
+
+/// Choose the address a phone on the same Wi-Fi can reach. Physical interfaces beat tunnels
+/// (VPNs such as Tailscale also use 100.64/10 and are useless to the phone); then RFC 1918 beats
+/// RFC 6598 shared space (100.64/10, which some ISP/mesh routers hand out on the LAN) beats
+/// anything else. Loopback, link-local and unspecified addresses are never picked.
+pub fn pick_lan_ipv4(ifs: &[(String, Ipv4Addr)]) -> Option<Ipv4Addr> {
+    const TUNNELS: [&str; 11] = ["utun", "ipsec", "ppp", "tun", "tap", "wg", "tailscale", "zt", "gif", "stf", "bridge"];
+    ifs.iter()
+        .filter(|(_, a)| !a.is_loopback() && !a.is_link_local() && !a.is_unspecified() && !a.is_broadcast())
+        .min_by_key(|(name, a)| {
+            let tunnel = TUNNELS.iter().any(|t| name.starts_with(t));
+            let o = a.octets();
+            let class = if a.is_private() {
+                0
+            } else if o[0] == 100 && (o[1] & 0xC0) == 64 {
+                1
+            } else {
+                2
+            };
+            (tunnel, class)
+        })
+        .map(|(_, a)| *a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ifs(list: &[(&str, &str)]) -> Vec<(String, Ipv4Addr)> {
+        list.iter().map(|(n, a)| (n.to_string(), a.parse().unwrap())).collect()
+    }
+
+    #[test]
+    fn lan_ip_ranking() {
+        // Wi-Fi on a 100.64/10 LAN with Tailscale up: the Wi-Fi address wins.
+        assert_eq!(
+            pick_lan_ipv4(&ifs(&[("lo0", "127.0.0.1"), ("utun3", "100.101.1.2"), ("en0", "100.69.76.44")])),
+            Some("100.69.76.44".parse().unwrap())
+        );
+        // RFC 1918 beats shared space; tunnels lose even with RFC 1918.
+        assert_eq!(
+            pick_lan_ipv4(&ifs(&[("utun1", "10.8.0.2"), ("en1", "100.70.0.1"), ("en0", "192.168.1.20")])),
+            Some("192.168.1.20".parse().unwrap())
+        );
+        assert_eq!(pick_lan_ipv4(&ifs(&[("utun1", "10.8.0.2")])), Some("10.8.0.2".parse().unwrap()));
+        assert_eq!(pick_lan_ipv4(&ifs(&[("lo0", "127.0.0.1"), ("en0", "169.254.3.3")])), None);
+        // 100.128/10 is not shared space.
+        assert_eq!(
+            pick_lan_ipv4(&ifs(&[("en0", "100.128.0.1"), ("en1", "100.127.0.1")])),
+            Some("100.127.0.1".parse().unwrap())
+        );
+    }
 }

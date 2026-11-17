@@ -60,7 +60,8 @@ pub(crate) struct Core {
     pub device: Option<PairedDevice>,
     pub channel: Option<SecureChannel>,
     pub offer: Option<PairingOffer>,
-    pub lan_url: String,
+    /// Shared with `LanTlsHandle`: `wss://<lan_domain>:<port>` while LAN TLS is on (CR-4).
+    pub lan_url: Arc<Mutex<String>>,
     pub incoming_tx: mpsc::Sender<Envelope>,
     /// Device records to persist (new pairing, seq reservations, replay window). CR-3.
     pub device_tx: mpsc::Sender<PairedDevice>,
@@ -86,7 +87,7 @@ impl Core {
         identity: Identity,
         device: Option<PairedDevice>,
         clock: Arc<dyn Clock>,
-        lan_url: String,
+        lan_url: Arc<Mutex<String>>,
         incoming_tx: mpsc::Sender<Envelope>,
         device_tx: mpsc::Sender<PairedDevice>,
         room_tx: watch::Sender<Option<String>>,
@@ -183,7 +184,7 @@ impl Core {
     fn begin_pairing(&mut self) -> Result<QrPayload, String> {
         let now_s = self.clock.now_ms() / 1000;
         let offer = PairingOffer::new(now_s);
-        let mut urls = vec![self.lan_url.clone()];
+        let mut urls = vec![self.lan_url.lock().expect("lock").clone()];
         if let Some(relay) = &self.cfg.relay_url {
             urls.push(format!("{}/r/{}", relay.trim_end_matches('/'), offer.room_id()));
         }
