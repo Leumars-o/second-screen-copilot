@@ -3,6 +3,10 @@ name = "ssc-relay"
 main = "src/index.ts"
 compatibility_date = "2025-09-01"
 
+# This deployment's custom domain (the agent's relay_url is wss://ws.live-preview.space). Must
+# differ from lan_domain, whose A record points at the PC's LAN IP. Remove or change when self-hosting.
+routes = [{ pattern = "ws.live-preview.space", custom_domain = true }]
+
 # One Durable Object per room. SQLite-backed so it runs on the Workers free plan.
 # The relay stores no content: the only persisted state is the 24 h expiry alarm.
 [[durable_objects.bindings]]
