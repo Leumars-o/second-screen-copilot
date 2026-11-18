@@ -142,7 +142,7 @@ async fn cloud_screen_hotkey_sends_the_image_and_window_text_and_streams_a_scree
         assert_eq!(p.images[0].data, JPEG);
         assert!(p.dynamic.contains(QUESTION), "window text reaches the model:\n{}", p.dynamic);
         assert!(p.dynamic.contains("Microsoft Word — Quiz.docx"));
-        assert!(p.prefix.contains("pressed the screen hotkey"), "screen.v1 prompt");
+        assert!(p.prefix.contains("pressed the screen hotkey"), "screen.v2 prompt");
     }
     assert_eq!(*r.screen.grabs.lock().unwrap(), vec![true]);
 

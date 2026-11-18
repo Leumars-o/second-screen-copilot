@@ -73,4 +73,18 @@ screen("product_price", chrome: "Customer chat — Intercom") {
   text("Customer: Hi! What is the monthly price of your Enterprise plan?", 60, 620)
   text("Reply…", 60, 300)
 }
+screen("wps_inference", chrome: "WPS Office — Interview prep.docx") {
+  // Ribbon noise, then a page with a small question, like a real word-processor window.
+  NSColor(white: 0.96, alpha: 1).setFill(); NSRect(x: 0, y: H - 150, width: W, height: 100).fill()
+  let small = NSFont.systemFont(ofSize: 16)
+  var x: CGFloat = 20
+  for t in ["Home", "Insert", "Page Layout", "References", "Review", "View", "Tools", "Paste", "Format Painter", "Calibri", "11", "B", "I", "U", "Styles", "Find and Replace"] {
+    text(t, x, H - 110, small); x += CGFloat(t.count) * 9 + 24
+  }
+  NSColor(white: 0.85, alpha: 1).setFill(); NSRect(x: 0, y: 0, width: 200, height: H - 150).fill()
+  NSColor.white.setFill(); NSRect(x: 260, y: 0, width: 880, height: H - 160).fill()
+  text("Interview prep", 300, 560, NSFont.boldSystemFont(ofSize: 22))
+  text("What is inference in AI?", 300, 510, NSFont.systemFont(ofSize: 18))
+  text("Page 1 of 1    6 words    English (US)", 20, 10, small)
+}
 print("ok")

@@ -1,4 +1,4 @@
-//! CR-20 eval: the screen prompt (`screen.v1.md`) + a screenshot → each vision model.
+//! CR-20 eval: the screen prompt (`screen.v2.md`) + a screenshot → each vision model.
 //! Eight synthetic screens with one known answer each (`fixtures/screens`, regenerate with
 //! `gen.swift`). Graded deterministically on the answer line (text before `---`).
 //! Live (real network, keychain keys), never run by the gate:
@@ -24,21 +24,54 @@ const CASES: &[(&str, &str, &[&str])] = &[
     ("code_print", "VS Code — interview.py", &["6"]),
     ("no_question", "Safari — Weather", &["no question found"]),
     ("product_price", "Intercom — Customer chat", &["not in your documents"]),
+    ("wps_inference", "WPS Office — Interview prep.docx", &["predict", "trained model", "new data", "new input"]),
 ];
 
-fn prompt(label: &str, jpeg: Vec<u8>) -> Prompt {
-    let t = include_str!("../../../contracts/prompts/screen.v1.md");
+/// Window text sent with a case (the accessibility read), like the lead's WPS run: toolbar noise
+/// around the actual question.
+fn window_text(name: &str) -> &'static str {
+    match name {
+        "wps_inference" => {
+            "Home\nInsert\nPage Layout\nReferences\nReview\nView\nTools\nPaste\nFormat Painter\nCalibri\n11\nStyles\nFind and Replace\nInterview prep\nWhat is inference in AI?\nPage 1 of 1\n6 words\nEnglish (US)"
+        }
+        _ => "",
+    }
+}
+
+/// Realistic context, like the lead's (profile + docs about their own product): it must shape
+/// the answer, not replace it.
+const ABOUT_ME: &str = "I'm an AI engineer at a Huawei partner. I build and sell AI contact-center solutions \
+(voice bots, agent assist, analytics) to banks and telcos in West Africa.";
+const DOCS: &str = "[huawei-aicc.md] Huawei AI Contact Center: omnichannel routing, voice bot, agent assist, \
+real-time speech analytics. Deployed on Huawei Cloud or on-premises.\n[role.md] AI Engineer role: designs \
+contact-center AI flows, integrates CRM, tunes ASR and NLU models.";
+
+/// Meta talk about the screen instead of the answer (the lead's first real run, CR-20).
+const META: &[&str] = &[
+    "image shows",
+    "the image",
+    "screenshot",
+    "the screen shows",
+    "the question asks",
+    "the document",
+    "wps",
+    "this is a conceptual question",
+    "the window",
+];
+
+fn prompt(label: &str, window: &str, jpeg: Vec<u8>) -> Prompt {
+    let t = include_str!("../../../contracts/prompts/screen.v2.md");
     let (prefix, dynamic) = t.split_once("<<<DYNAMIC>>>").unwrap();
     Prompt {
         prefix: prefix
-            .replace("{{about_me}}", "AI engineer at Acme, which sells an AI contact-center product.")
+            .replace("{{about_me}}", ABOUT_ME)
             .replace("{{profile_name}}", "ai-engineer")
-            .replace("{{profile_instructions}}", ""),
+            .replace("{{profile_instructions}}", "Interviews and client calls about our AI contact center."),
         dynamic: dynamic
-            .replace("{{docs}}", "")
+            .replace("{{docs}}", DOCS)
             .replace("{{transcript}}", "")
             .replace("{{question}}", label)
-            .replace("{{screen}}", ""),
+            .replace("{{screen}}", window),
         max_tokens: 400,
         temperature: 0.2,
         stop: vec![],
@@ -74,7 +107,7 @@ async fn run(m: &dyn AnswerModel, pause: std::time::Duration) -> usize {
         let jpeg = std::fs::read(format!("{dir}/{name}.jpg")).unwrap();
         let (tx, mut rx) = mpsc::channel(1024);
         let t = Instant::now();
-        let res = m.stream(&prompt(label, jpeg), tx, Cancel::new()).await;
+        let res = m.stream(&prompt(label, window_text(name), jpeg), tx, Cancel::new()).await;
         let mut text = String::new();
         while let Ok(tok) = rx.try_recv() {
             text.push_str(&tok.text);
@@ -83,7 +116,17 @@ async fn run(m: &dyn AnswerModel, pause: std::time::Duration) -> usize {
         match res {
             Ok(s) => {
                 let line = answer_line(&text);
-                let pass = passes(&line, expect);
+                let lower = text.to_lowercase();
+                // "No question found" must say what is on screen: describing it is the answer.
+                let meta = if *name == "no_question" { None } else { META.iter().find(|m| lower.contains(*m)) };
+                let echoed = name.ends_with("_inference") && line.to_lowercase().contains("what is inference");
+                let pass = passes(&line, expect) && meta.is_none() && !echoed;
+                if let Some(m) = meta {
+                    println!("     meta talk ({m:?}): {}", text.replace('\n', " | "));
+                }
+                if echoed {
+                    println!("     answer line restates the question");
+                }
                 ok += usize::from(pass);
                 println!(
                     "{} {:<15} ttft {:>5} ms total {:>5} ms | {}",
@@ -119,7 +162,7 @@ async fn screen_eval_groq_qwen() {
     let Some(k) = key(SecretKey::Groq) else { return println!("skip: no Groq key") };
     let m = OpenAiCompat::groq(GROQ_BASE_URL, "qwen/qwen3.8-27b", k);
     let ok = run(&m, std::time::Duration::from_secs(25)).await;
-    assert!(ok >= 7, "{ok}/8");
+    assert!(ok + 1 >= CASES.len(), "{ok}/{}", CASES.len());
 }
 
 #[tokio::test]
@@ -127,5 +170,5 @@ async fn screen_eval_gemini() {
     let Some(k) = key(SecretKey::Gemini) else { return println!("skip: no Gemini key") };
     let m = OpenAiCompat::gemini(GEMINI_BASE_URL, "gemini-3.5-flash-lite", k, GeminiTier::Paid, false).unwrap();
     let ok = run(&m, std::time::Duration::ZERO).await;
-    assert!(ok >= 7, "{ok}/8");
+    assert!(ok + 1 >= CASES.len(), "{ok}/{}", CASES.len());
 }

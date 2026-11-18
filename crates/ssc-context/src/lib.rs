@@ -87,13 +87,13 @@ impl PromptKind {
 
     fn source(self) -> &'static str {
         match self {
-            Self::Cue => include_str!("../../../contracts/prompts/cue.v1.md"),
+            Self::Cue => include_str!("../../../contracts/prompts/cue.v2.md"),
             Self::Fact => include_str!("../../../contracts/prompts/fact.v1.md"),
             Self::Objection => include_str!("../../../contracts/prompts/objection.v1.md"),
             Self::Expand => include_str!("../../../contracts/prompts/expand.v1.md"),
             Self::Summary => include_str!("../../../contracts/prompts/summary.v1.md"),
             Self::Followup => include_str!("../../../contracts/prompts/followup.v1.md"),
-            Self::Screen => include_str!("../../../contracts/prompts/screen.v1.md"),
+            Self::Screen => include_str!("../../../contracts/prompts/screen.v2.md"),
         }
     }
 

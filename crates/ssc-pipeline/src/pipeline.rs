@@ -865,6 +865,8 @@ struct Push {
     started: bool,
     first_sent: bool,
     detail_text: String,
+    /// Everything streamed (both blocks), for the debug log only.
+    all_text: String,
 }
 
 /// `answer.start` (once), naming the model that produced the first token.
@@ -904,6 +906,12 @@ async fn push_delta(
             return; // "shorter": cues only (L9; the cap alone can't guarantee it)
         }
         p.detail_text.push_str(&d.text);
+    }
+    if debug_answers_on() {
+        if d.block == Block::Detail && !p.all_text.contains("\n---\n") {
+            p.all_text.push_str("---\n");
+        }
+        p.all_text.push_str(&d.text);
     }
     ensure_start(inner, job, sid, model, p).await;
     for text in limits::split_chars(&d.text, 4096) {
@@ -1009,6 +1017,7 @@ async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken, gate
     if let Some(note) = job.note {
         prompt.dynamic.push_str(note);
     }
+    let debug_prompt = debug_answers_on().then(|| (prompt.prefix.clone(), prompt.dynamic.clone(), image_note(&prompt)));
     if job.shorter && job.format == AnswerFormat::Screen {
         prompt.dynamic.push_str(SCREEN_SHORTER_NOTE);
         prompt.max_tokens = prompt.max_tokens.min(SHORTER_MAX_TOKENS);
@@ -1081,7 +1090,7 @@ async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken, gate
     }
 
     // 6. Push.
-    let mut p = Push { started: false, first_sent: false, detail_text: String::new() };
+    let mut p = Push { started: false, first_sent: false, detail_text: String::new(), all_text: String::new() };
     for d in held {
         push_delta(&inner, &job, sid, &mrx, d, &mut p).await;
     }
@@ -1128,7 +1137,33 @@ async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken, gate
     if end.reason != AnswerEndReason::Cancelled {
         ensure_start(&inner, &job, sid, &mrx, &mut p).await;
     }
+    if let Some((prefix, dynamic, images)) = debug_prompt {
+        print_debug_answer(&job, &model, &prefix, &dynamic, &images, &p.all_text);
+    }
     finish(&inner, &job, sid, end, model).await;
+}
+
+/// `SSC_DEBUG_ANSWERS=1`: each answer's prompt text (images as size only), model and raw output
+/// are printed to the agent's terminal, to diagnose bad answers (CR-20). Never written to disk:
+/// prompts hold call and screen content (security_pipeline `only_reviewed_code_writes_files`).
+fn debug_answers_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("SSC_DEBUG_ANSWERS").is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true")))
+}
+
+fn image_note(p: &Prompt) -> String {
+    p.images.iter().map(|i| format!("{} {} bytes", i.mime, i.data.len())).collect::<Vec<_>>().join(", ")
+}
+
+fn print_debug_answer(job: &Job, model: &str, prefix: &str, dynamic: &str, images: &str, output: &str) {
+    log(format!(
+        "debug answer {} format {:?} trigger {:?} model {model} images: {}\n===== PREFIX =====\n{prefix}\n===== DYNAMIC =====\n{dynamic}\n===== OUTPUT =====\n{output}\n===== END {} =====",
+        job.answer_id,
+        job.format,
+        job.trigger,
+        if images.is_empty() { "none" } else { images },
+        job.answer_id,
+    ));
 }
 
 fn end_with(id: Uuid, reason: AnswerEndReason) -> AnswerEnd {

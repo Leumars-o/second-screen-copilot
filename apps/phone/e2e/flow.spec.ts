@@ -262,4 +262,6 @@ test("CR-20: a screen answer shows the answer and its working as free text", asy
   await expect(card.getByTestId("stream-cue")).toHaveText("C — the arrow from A points to box C\n");
   await expect(card.getByTestId("stream-detail")).toContainText("2: B and D have no incoming arrows.");
   await expect(card.getByTestId("cues")).toHaveCount(0);
+  await expect(card.getByTestId("act-expand-all")).toHaveCount(0); // nothing to expand
+  await expect(card.getByTestId("act-regenerate").or(card.getByText("Again"))).toBeVisible();
 });

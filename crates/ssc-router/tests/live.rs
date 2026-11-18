@@ -16,7 +16,7 @@ use ssc_router::{SystemOneDecision, parse_answer};
 use tokio::sync::mpsc;
 
 fn prompt() -> Prompt {
-    let cue = include_str!("../../../contracts/prompts/cue.v1.md");
+    let cue = include_str!("../../../contracts/prompts/cue.v2.md");
     let (prefix, dynamic) = cue.split_once("<<<DYNAMIC>>>").unwrap();
     Prompt {
         prefix: prefix

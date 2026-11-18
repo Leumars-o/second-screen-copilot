@@ -105,9 +105,11 @@ export function AnswerCard({ copilot, answer, current }: { copilot: Copilot; ans
           <button type="button" onClick={() => copilot.simple("number", answer.id)} data-testid="act-number">
             Number
           </button>
-          <button type="button" onClick={() => copilot.expandAll(answer.id)} data-testid="act-expand-all">
-            Expand all
-          </button>
+          {answer.start.format !== "screen" && (
+            <button type="button" onClick={() => copilot.expandAll(answer.id)} data-testid="act-expand-all">
+              Expand all
+            </button>
+          )}
           <button type="button" onClick={() => copilot.rate(answer.id, "up")} aria-pressed={answer.rating === "up"} data-testid="act-up" aria-label="Useful">
             +1
           </button>
