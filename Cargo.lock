@@ -5609,6 +5609,8 @@ dependencies = [
 name = "ssc-agent"
 version = "0.1.0"
 dependencies = [
+ "block2",
+ "objc2",
  "serde",
  "serde_json",
  "ssc-core",

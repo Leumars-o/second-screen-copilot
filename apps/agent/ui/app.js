@@ -130,8 +130,8 @@ async function renderChecklist() {
     if (p.status !== "granted") {
       const btn = document.createElement("button");
       btn.className = "secondary";
-      btn.textContent = "Open settings";
-      btn.onclick = () => call("request_permission", { id: p.id });
+      btn.textContent = "Grant";
+      btn.onclick = () => call("request_permission", { id: p.id }).then(() => renderChecklist());
       li.append(btn);
     }
     ul.append(li);
