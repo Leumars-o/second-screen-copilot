@@ -1,6 +1,6 @@
 "use client";
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
-import type { LinkStatus } from "@ssc/protocol";
+import type { LinkAttempt, LinkStatus } from "@ssc/protocol";
 import { Copilot } from "../lib/copilot";
 import { connect, defaultDeviceName, forgetPairing, loadPairing, pairFromQr, takePairFromLocation, type LinkHandle, type StoredPairing } from "../lib/connection";
 import { browserVibrate } from "../lib/vibrate";
@@ -12,7 +12,48 @@ import { ContactsScreen, SummaryScreen } from "./SummaryScreen";
 
 type Screen = "live" | "summary" | "memory" | "contacts";
 
-function StatusLine({ status, paired, onUnpair }: { status: LinkStatus | null; paired: boolean; onUnpair: () => void }) {
+const ATTEMPTS_KEPT = 8;
+
+/** Where the link tried to go and how each attempt ended: the only way to see, on the phone,
+ * whether the PC's Wi-Fi address or the relay is unreachable, slow, or closing on us. */
+function ConnectionDetails({ urls, attempts }: { urls: string[]; attempts: LinkAttempt[] }) {
+  const t0 = attempts[0]?.at ?? 0;
+  return (
+    <div className="conn-details" data-testid="conn-details">
+      <p className="muted small">Addresses from the QR code, tried in order:</p>
+      <ol>
+        {urls.map((u) => (
+          <li key={u}>
+            <code>{u.replace(/\/r\/[0-9a-f]+$/, "/r/…")}</code>
+          </li>
+        ))}
+      </ol>
+      <p className="muted small">Recent attempts (newest last):</p>
+      <ul data-testid="conn-attempts">
+        {attempts.length === 0 && <li className="muted">none yet</li>}
+        {attempts.map((a) => (
+          <li key={`${a.at}-${a.url}-${a.outcome}`}>
+            +{((a.at - t0) / 1000).toFixed(1)} s · {a.via === "lan" ? "Wi-Fi" : "relay"} · {a.outcome} after {a.ms} ms
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function StatusLine({
+  status,
+  paired,
+  onUnpair,
+  urls,
+  attempts,
+}: {
+  status: LinkStatus | null;
+  paired: boolean;
+  onUnpair: () => void;
+  urls: string[];
+  attempts: LinkAttempt[];
+}) {
   const [menu, setMenu] = useState(false);
   let label = "Starting…";
   let cls = "off";
@@ -28,9 +69,12 @@ function StatusLine({ status, paired, onUnpair }: { status: LinkStatus | null; p
         {label}
       </button>
       {menu && (
-        <button type="button" className="danger small" onClick={onUnpair} data-testid="unpair">
-          Unpair
-        </button>
+        <>
+          <button type="button" className="danger small" onClick={onUnpair} data-testid="unpair">
+            Unpair
+          </button>
+          <ConnectionDetails urls={urls} attempts={attempts} />
+        </>
       )}
     </div>
   );
@@ -51,6 +95,7 @@ export function App() {
   const [status, setStatus] = useState<LinkStatus | null>(null);
   const [paired, setPaired] = useState(false);
   const [pairError, setPairError] = useState<string | null>(null);
+  const [attempts, setAttempts] = useState<LinkAttempt[]>([]);
   const [screen, setScreen] = useState<Screen>("live");
   const [openAnswer, setOpenAnswer] = useState<string | null>(null);
 
@@ -83,13 +128,38 @@ export function App() {
 
   useEffect(() => {
     if (!stored) return;
-    const h = connect(stored, copilot, { onStatus: setStatus, onPaired: () => setPaired(true) });
+    setAttempts([]);
+    const h = connect(stored, copilot, {
+      onStatus: setStatus,
+      onPaired: () => setPaired(true),
+      onAttempt: (a) => setAttempts((prev) => [...prev, a].slice(-ATTEMPTS_KEPT)),
+    });
     linkRef.current = h;
     return () => {
       h.stop();
       if (linkRef.current === h) linkRef.current = null;
     };
   }, [stored, copilot]);
+
+  // A pairing link opened in a tab already showing the app only changes the hash (no reload).
+  useEffect(() => {
+    const onHash = () => {
+      const link = takePairFromLocation();
+      if (!link) return;
+      void loadPairing().then(async (s) => {
+        if (s && !window.confirm("Pair with this PC? It replaces your current pairing.")) return;
+        setPairError(null);
+        try {
+          setStored(await pairFromQr(link, defaultDeviceName()));
+          setPaired(false);
+        } catch (e) {
+          setPairError((e as Error).message);
+        }
+      });
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
 
   // Show the summary as soon as one arrives.
   const summaryCount = state.summaries.length;
@@ -132,7 +202,7 @@ export function App() {
 
   return (
     <main className="app">
-      <StatusLine status={status} paired={paired} onUnpair={unpair} />
+      <StatusLine status={status} paired={paired} onUnpair={unpair} urls={stored.pairing.urls} attempts={attempts} />
 
       {screen === "live" && (
         <section className="screen live" data-testid="live-screen">

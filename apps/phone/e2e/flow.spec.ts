@@ -51,6 +51,11 @@ test("pair -> stream -> expand -> pin -> summary", async ({ request }) => {
     const hello = (await mock.received(request)).find((e) => e.type === "pair.hello")!;
     expect(hello.payload.device_name).toBe("E2E Pixel");
     expect(hello.seq).toBe(0);
+    // Connection details: the QR's addresses and how the attempt went.
+    await page.getByTestId("status").click();
+    await expect(page.getByTestId("conn-attempts")).toContainText(/Wi-Fi · open after \d+ ms/);
+    await page.getByTestId("status").click();
+    await expect(page.getByTestId("conn-details")).toHaveCount(0);
   });
 
   let answerId = "";
@@ -227,4 +232,15 @@ test("CR-19: opening a pairing link (camera scan) pairs in one step", async ({ r
   const hellos = (await mock.received(request)).filter((e) => e.type === "pair.hello");
   expect(hellos.length).toBe(before + 1);
   expect(dialogs).toEqual(["Pair with this PC? It replaces your current pairing."]);
+});
+
+test("CR-19: a pairing link opened in the app's own tab (hash change only) also pairs", async ({ request }) => {
+  const qr = await (await request.post("/__mock/qr")).json();
+  const b64url = Buffer.from(JSON.stringify(qr)).toString("base64url");
+  const before = (await mock.received(request)).filter((e) => e.type === "pair.hello").length;
+  page.once("dialog", (d) => void d.accept());
+  await page.evaluate((h) => (location.hash = h), `#pair=${b64url}`);
+  await expect.poll(async () => (await mock.received(request)).filter((e) => e.type === "pair.hello").length).toBe(before + 1);
+  await expect(page.getByTestId("status")).toHaveText(/Connected · Wi-Fi/);
+  expect(new URL(page.url()).hash).toBe("");
 });

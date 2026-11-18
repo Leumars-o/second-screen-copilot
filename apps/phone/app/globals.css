@@ -47,7 +47,9 @@ h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 }
 .screen { display: flex; flex-direction: column; gap: 10px; }
 
-.status { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.status { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+.conn-details { flex-basis: 100%; font-size: 13px; margin-top: 8px; overflow-wrap: anywhere; }
+.conn-details ol, .conn-details ul { margin: 4px 0 8px; padding-left: 20px; }
 .status-btn { background: none; border: none; padding: 4px 0; min-height: 32px; font-size: 14px; color: var(--muted); display: flex; gap: 8px; align-items: center; }
 .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--danger); display: inline-block; }
 .dot-ok { background: var(--ok); }

@@ -2,7 +2,7 @@
 // discarded after deriving them) is sealed in IndexedDB under a non-extractable AES-GCM key
 // (./keystore, CR-15). localStorage holds only the non-secret seq state, scoped to the pairing
 // (contracts/crypto/README.md § Frames, seq scope).
-import { parseQr, PhoneLink, startPairing, type ChannelState, type LinkStatus, type Pairing, type WsLike } from "@ssc/protocol";
+import { parseQr, PhoneLink, startPairing, type ChannelState, type LinkAttempt, type LinkStatus, type Pairing, type WsLike } from "@ssc/protocol";
 import type { Copilot } from "./copilot";
 import { deleteSealedPairing, loadSealedPairing, saveSealedPairing } from "./keystore";
 
@@ -126,7 +126,7 @@ export interface LinkHandle {
 export function connect(
   stored: StoredPairing,
   copilot: Copilot,
-  hooks: { onStatus: (s: LinkStatus) => void; onPaired: () => void },
+  hooks: { onStatus: (s: LinkStatus) => void; onPaired: () => void; onAttempt?: (a: LinkAttempt) => void },
   ws: (url: string) => WsLike = (url) => new WebSocket(url) as unknown as WsLike,
 ): LinkHandle {
   const prev = restoreLinkState(read<StoredLink>(LINK_KEY));
@@ -152,6 +152,7 @@ export function connect(
       copilot.handle(env);
     },
     onStatus: hooks.onStatus,
+    ...(hooks.onAttempt ? { onAttempt: hooks.onAttempt } : {}),
     onPersist: ({ state, sessionId, helloConfirmed }) => {
       pending = { state, sessionId, helloConfirmed };
       if (helloConfirmed && stored.hello) {
