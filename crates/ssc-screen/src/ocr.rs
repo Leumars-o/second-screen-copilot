@@ -47,6 +47,20 @@ pub trait FrameSource: Send + Sync {
     fn capture(&self, window: Rect) -> Result<Frame>;
 }
 
+/// An 8-bit RGB image, row-major, top row first (`width * height * 3` bytes).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RgbFrame {
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>,
+}
+
+/// Colour capture of a screen rectangle for vision models (CR-20), scaled so neither side
+/// exceeds `max_edge` pixels (aspect ratio kept, never upscaled).
+pub trait ColorSource: Send + Sync {
+    fn capture_color(&self, window: Rect, max_edge: u32) -> Result<RgbFrame>;
+}
+
 /// Text recognition on a grayscale image (Windows.Media.Ocr, Apple Vision).
 pub trait OcrEngine: Send + Sync {
     fn recognize(&self, gray: &[u8], width: u32, height: u32) -> Result<Vec<OcrLine>>;

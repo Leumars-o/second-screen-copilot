@@ -41,7 +41,7 @@ use ssc_core::timing::{Stage, Timing};
 use ssc_core::traits::{
     AnswerModel, AudioSource, Clock, DecisionModel, MemoryStore, ScreenSource, SttEngine, Transport,
 };
-use ssc_core::types::{Prompt, ScreenSnapshot, TranscriptSegment};
+use ssc_core::types::{Prompt, ScreenGrab, ScreenSnapshot, TranscriptSegment};
 use ssc_core::{Result, SscError};
 use ssc_memory::{AnswerRecord, SqliteMemory};
 use ssc_router::grammar::{ParsedAnswer, merge_detail};
@@ -141,6 +141,9 @@ impl Settings {
 
 /// Answers remembered for phone commands (regenerate, shorter, …); the oldest are dropped (L2).
 const MAX_REMEMBERED_ANSWERS: usize = 256;
+/// Screen grabs (with their images, ~100-400 KB each) kept for "again" / "shorter" on screen
+/// answers (CR-20). Older screen answers re-grab the screen.
+const MAX_REMEMBERED_GRABS: usize = 8;
 /// `first_frame` entries the phone never reported a paint time for are dropped after this (L2).
 const FIRST_FRAME_TTL_MS: u64 = 5 * 60_000;
 
@@ -171,6 +174,10 @@ struct Job {
     expand: Option<Vec<Cue>>,
     /// Fired without a decision in local/offline mode: tag it in the background (M5).
     tag: bool,
+    /// CR-20 screen hotkey: the grabbed window (text + image) this answer is about.
+    screen: Option<Arc<ScreenGrab>>,
+    /// Extra instruction appended to the dynamic prompt (screen "shorter" / "number").
+    note: Option<&'static str>,
 }
 
 impl Job {
@@ -188,6 +195,28 @@ impl Job {
             kind: PromptKind::for_format(ev.format),
             shorter: false,
             expand: None,
+            screen: None,
+            note: None,
+        }
+    }
+
+    /// CR-20: an answer about a grabbed window.
+    fn screen(answer_id: Uuid, trigger: Trigger, profile: String, grab: Arc<ScreenGrab>) -> Self {
+        Self {
+            answer_id,
+            trigger,
+            question: grab.label(),
+            format: AnswerFormat::Screen,
+            intent: Intent::None,
+            urgency: Urgency::High,
+            tier: Tier::Fast,
+            profile,
+            kind: PromptKind::Screen,
+            shorter: false,
+            expand: None,
+            tag: false,
+            screen: Some(grab),
+            note: None,
         }
     }
 }
@@ -248,6 +277,8 @@ struct Inner {
     tag_gate: Option<TagGate>,
     /// `frame_sent` comes from the transport, not from `send()` returning.
     external_frame_sent: bool,
+    /// answer_id → the grab a screen answer used (newest last, at most [`MAX_REMEMBERED_GRABS`]).
+    screen_grabs: Mutex<Vec<(Uuid, Arc<ScreenGrab>)>>,
     cancel: CancellationToken,
 }
 
@@ -258,6 +289,9 @@ pub struct Pipeline {
 }
 
 const SHORTER_NOTE: &str = "\nThe user tapped \"shorter\": output exactly 3 cues and no \"---\" detail block.\n";
+const SCREEN_SHORTER_NOTE: &str =
+    "\nThe user tapped \"shorter\": output only the first line (the answer), no \"---\" block.\n";
+const SCREEN_NUMBER_NOTE: &str = "\nThe user tapped \"number\": make the first line the number (with units) the question asks for, if it asks for one.\n";
 /// "Shorter" caps the visible answer (3 cues of 2–6 words fit easily).
 const SHORTER_MAX_TOKENS: u32 = 60;
 const SHORTER_CUES: usize = 3;
@@ -285,6 +319,7 @@ impl Pipeline {
             live: Mutex::new(Live::default()),
             answers: Mutex::new(HashMap::new()),
             answer_seq: AtomicU64::new(0),
+            screen_grabs: Mutex::new(Vec::new()),
             first_frame: Mutex::new(HashMap::new()),
             speculative: Mutex::new(HashMap::new()),
             active_answers: AtomicUsize::new(0),
@@ -394,7 +429,10 @@ impl Pipeline {
                 Err(e) => log(format!("speech-to-text failed to start: {e}")),
             }
         }
-        if let Some(screen) = inner.parts.screen.clone() {
+        // CR-20: continuous screen reading is opt-in; the screen hotkey reads on demand.
+        if inner.settings.config.screen_watch
+            && let Some(screen) = inner.parts.screen.clone()
+        {
             tasks.push(tokio::spawn(screen_loop(inner.clone(), screen, in_tx.clone(), cancel.clone())));
         }
         drop(in_tx);
@@ -413,6 +451,48 @@ impl Pipeline {
         let ev = engine.hotkey();
         let id = ev.answer_id;
         spawn_job(&self.inner, Job::from_event(ev), cancel);
+        Some(id)
+    }
+
+    /// CR-20 screen hotkey: grab the focused window (an image too, unless local-only), answer
+    /// what is on it now. Works with or without a session. `None` when there is no screen
+    /// reader on this platform.
+    pub fn answer_from_screen(&self) -> Option<Uuid> {
+        let inner = self.inner.clone();
+        let screen = inner.parts.screen.clone()?;
+        let id = Uuid::new_v4();
+        record(&inner, id, Stage::TriggerFired);
+        let cancel = answer_cancel(&inner);
+        let profile = current_profile(&inner);
+        // Local-only mode sends nothing off the PC: text (with OCR) only.
+        let image = inner.settings.config.mode != Mode::Local;
+        tokio::spawn(async move {
+            let grab = match blocking(move || screen.grab(image)).await {
+                Ok(g) => g,
+                Err(e) => {
+                    log(format!("screen hotkey: could not read the focused window: {e}"));
+                    let empty = ScreenGrab {
+                        app: String::new(),
+                        window_title: String::new(),
+                        text: String::new(),
+                        text_source: ssc_core::types::ScreenTextSource::Accessibility,
+                        image: None,
+                        image_size: None,
+                        image_error: None,
+                    };
+                    let job = Job::screen(id, Trigger::Hotkey, profile, Arc::new(empty));
+                    let sid = inner.live.lock().unwrap().session_id;
+                    finish(&inner, &job, sid, error_end(id), String::new()).await;
+                    return;
+                }
+            };
+            if let Some(e) = &grab.image_error {
+                log(format!("screen hotkey: no image ({e}); answering from the window text"));
+            }
+            let grab = Arc::new(grab);
+            remember_grab(&inner, id, grab.clone());
+            run_answer(inner, Job::screen(id, Trigger::Hotkey, profile, grab), cancel, None).await;
+        });
         Some(id)
     }
 
@@ -881,6 +961,8 @@ async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken, gate
     // 4. Context.
     let mem = inner.parts.memory.clone();
     let (profile_id, kind, k) = (job.profile.clone(), job.kind, inner.settings.retrieve_k);
+    // CR-20: a screen answer reads its own grab, not the watch loop's diff.
+    let screen = job.screen.as_ref().map_or(screen, |g| g.text.clone());
     let mut input = ContextInput {
         transcript,
         screen,
@@ -919,7 +1001,18 @@ async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken, gate
     stamps.record(&inner, id, Stage::ContextReady);
 
     let mut prompt: Prompt = assembled.prompt;
-    if job.shorter {
+    if let Some(img) = job.screen.as_ref().and_then(|g| g.image.clone())
+        && mode != Mode::Local
+    {
+        prompt.images = vec![img];
+    }
+    if let Some(note) = job.note {
+        prompt.dynamic.push_str(note);
+    }
+    if job.shorter && job.format == AnswerFormat::Screen {
+        prompt.dynamic.push_str(SCREEN_SHORTER_NOTE);
+        prompt.max_tokens = prompt.max_tokens.min(SHORTER_MAX_TOKENS);
+    } else if job.shorter {
         prompt.dynamic.push_str(SHORTER_NOTE);
         // Visible-answer cap; reasoning models get their own headroom in the adapter (L9).
         prompt.max_tokens = prompt.max_tokens.min(SHORTER_MAX_TOKENS);
@@ -1190,7 +1283,34 @@ fn command_job(inner: &Inner, m: Option<&AnswerMeta>, question: String) -> Job {
         shorter: false,
         expand: None,
         tag: false,
+        screen: None,
+        note: None,
     }
+}
+
+fn current_profile(inner: &Inner) -> String {
+    let p = inner.live.lock().unwrap().profile.clone();
+    if p.is_empty() { "default".into() } else { p }
+}
+
+fn remember_grab(inner: &Inner, id: Uuid, grab: Arc<ScreenGrab>) {
+    let mut g = inner.screen_grabs.lock().unwrap();
+    g.push((id, grab));
+    let excess = g.len().saturating_sub(MAX_REMEMBERED_GRABS);
+    g.drain(..excess);
+}
+
+fn remembered_grab(inner: &Inner, id: Uuid) -> Option<Arc<ScreenGrab>> {
+    inner.screen_grabs.lock().unwrap().iter().rev().find(|(k, _)| *k == id).map(|(_, g)| g.clone())
+}
+
+/// "Again" / "shorter" / "number" on a screen answer: the same grab again (CR-20). `None` when
+/// the grab is no longer remembered; the caller then grabs the screen afresh.
+fn screen_command_job(inner: &Inner, m: &AnswerMeta, of: Uuid) -> Option<Job> {
+    let grab = remembered_grab(inner, of)?;
+    let id = Uuid::new_v4();
+    remember_grab(inner, id, grab.clone());
+    Some(Job::screen(id, Trigger::Command, m.profile.clone(), grab))
 }
 
 fn answer_cancel(inner: &Inner) -> CancellationToken {
@@ -1205,6 +1325,25 @@ async fn handle_command(inner: Arc<Inner>, c: Command) {
                 log(format!("pin {answer_id}: {e}"));
             }
             None
+        }
+        Command::Regenerate { answer_id } | Command::Shorter { answer_id } | Command::Number { answer_id }
+            if meta(&inner, answer_id).is_some_and(|m| m.format == AnswerFormat::Screen) =>
+        {
+            let m = meta(&inner, answer_id).expect("checked");
+            let (shorter, note) = match c {
+                Command::Shorter { .. } => (true, None),
+                Command::Number { .. } => (false, Some(SCREEN_NUMBER_NOTE)),
+                _ => (false, None),
+            };
+            match screen_command_job(&inner, &m, answer_id) {
+                Some(j) => Some(Job { shorter, note, ..j }),
+                None => {
+                    // The grab was dropped (older than the last few screen answers): read the
+                    // screen again.
+                    let _ = Pipeline { inner: inner.clone() }.answer_from_screen();
+                    None
+                }
+            }
         }
         Command::Regenerate { answer_id } => {
             meta(&inner, answer_id).map(|m| command_job(&inner, Some(&m), m.question.clone()))

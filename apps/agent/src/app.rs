@@ -409,6 +409,12 @@ fn on_hotkey(app: &AppHandle, action: Hotkey) {
                     s.pipeline.answer_now();
                 }
             }
+            Hotkey::Screen => {
+                let st = app.state::<AppState>();
+                if let Some(s) = st.system.get() {
+                    s.pipeline.answer_from_screen();
+                }
+            }
             Hotkey::Tray => toggle_tray(&app),
         }
     });
@@ -418,6 +424,8 @@ fn on_hotkey(app: &AppHandle, action: Hotkey) {
 enum Hotkey {
     Capture,
     Answer,
+    /// CR-20: grab the focused window and answer what is on it.
+    Screen,
     Tray,
 }
 
@@ -426,6 +434,7 @@ fn register_hotkeys(app: &AppHandle, cfg: &Config) -> Vec<(Shortcut, Hotkey)> {
     for (spec, action) in [
         (&cfg.hotkeys.capture_toggle, Hotkey::Capture),
         (&cfg.hotkeys.answer_now, Hotkey::Answer),
+        (&cfg.hotkeys.screen_answer, Hotkey::Screen),
         (&cfg.hotkeys.tray_toggle, Hotkey::Tray),
     ] {
         match spec.parse::<Shortcut>() {
@@ -500,14 +509,16 @@ pub fn run() {
 
             let capture = MenuItem::with_id(app, "capture", "Start capture", true, None::<&str>)?;
             let answer = MenuItem::with_id(app, "answer", "Answer now", true, None::<&str>)?;
+            let screen = MenuItem::with_id(app, "screen", "Answer from screen", true, None::<&str>)?;
             let open = MenuItem::with_id(app, "settings", "Settings…", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&capture, &answer, &open, &quit])?;
+            let menu = Menu::with_items(app, &[&capture, &answer, &screen, &open, &quit])?;
             app.manage(CaptureItem(capture));
             let mut tray = TrayIconBuilder::with_id(TRAY_ID).tooltip("Copilot: idle").menu(&menu).on_menu_event(
                 |app, ev| match ev.id.as_ref() {
                     "capture" => on_hotkey(app, Hotkey::Capture),
                     "answer" => on_hotkey(app, Hotkey::Answer),
+                    "screen" => on_hotkey(app, Hotkey::Screen),
                     "settings" => show_settings(app),
                     "quit" => {
                         let app = app.clone();
@@ -558,7 +569,7 @@ mod tests {
     #[test]
     fn default_hotkeys_parse() {
         let h = Config::default().hotkeys;
-        for spec in [&h.capture_toggle, &h.answer_now, &h.tray_toggle] {
+        for spec in [&h.capture_toggle, &h.answer_now, &h.screen_answer, &h.tray_toggle] {
             assert!(spec.parse::<Shortcut>().is_ok(), "{spec}");
         }
     }

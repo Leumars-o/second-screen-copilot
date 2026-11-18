@@ -18,6 +18,12 @@ pub use tokio_util::sync::CancellationToken as Cancel;
 /// Focused window → structured text. Must return within ~50 ms (p95).
 pub trait ScreenSource: Send + Sync {
     fn snapshot(&self) -> Result<ScreenSnapshot>;
+    /// CR-20 screen hotkey: the focused window now, with an image when `image` is set and the
+    /// platform can capture one. Default: the snapshot's text only.
+    fn grab(&self, image: bool) -> Result<crate::types::ScreenGrab> {
+        let err = image.then(|| "no colour capture on this platform".to_string());
+        Ok(crate::types::ScreenGrab::from_snapshot(self.snapshot()?, err))
+    }
 }
 
 /// Mic ("me") or system audio ("them"), 16 kHz mono PCM16.

@@ -244,3 +244,22 @@ test("CR-19: a pairing link opened in the app's own tab (hash change only) also 
   await expect(page.getByTestId("status")).toHaveText(/Connected · Wi-Fi/);
   expect(new URL(page.url()).hash).toBe("");
 });
+
+test("CR-20: a screen answer shows the answer and its working as free text", async ({ request }) => {
+  await mock.post(request, "answer", {
+    format: "screen",
+    trigger: "hotkey",
+    deltas: [
+      { block: "cue", text: "C — the arrow from A points to box C\n" },
+      { block: "detail", text: "1: The arrow leaves A and ends at C's left edge.\n" },
+      { block: "detail", text: "2: B and D have no incoming arrows.\n" },
+    ],
+    end: { cues: [] },
+  });
+  const card = page.getByTestId("answer-current");
+  await expect(card).toHaveAttribute("data-state", "done");
+  await expect(card.locator(".chip").first()).toHaveText("Screen");
+  await expect(card.getByTestId("stream-cue")).toHaveText("C — the arrow from A points to box C\n");
+  await expect(card.getByTestId("stream-detail")).toContainText("2: B and D have no incoming arrows.");
+  await expect(card.getByTestId("cues")).toHaveCount(0);
+});

@@ -108,6 +108,74 @@ pub struct Prompt {
     pub max_tokens: u32,
     pub temperature: f32,
     pub stop: Vec<String>,
+    /// CR-20: images attached to the user turn (the screen hotkey). Adapters that cannot send
+    /// images refuse a prompt that has any (`SscError::Unavailable`), so the router fails over.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<PromptImage>,
+}
+
+/// CR-20 screen hotkey: the focused window at the moment the hotkey was pressed.
+#[derive(Debug, Clone)]
+pub struct ScreenGrab {
+    pub app: String,
+    pub window_title: String,
+    /// Accessibility text (or OCR text when no image was taken), in reading order.
+    pub text: String,
+    pub text_source: ScreenTextSource,
+    pub image: Option<PromptImage>,
+    /// Pixel size of `image`.
+    pub image_size: Option<(u32, u32)>,
+    /// Why an image was asked for but not produced (permission, no bounds, ...).
+    pub image_error: Option<String>,
+}
+
+impl ScreenGrab {
+    /// Text-only grab from a snapshot.
+    pub fn from_snapshot(snap: ScreenSnapshot, image_error: Option<String>) -> Self {
+        Self {
+            text: snap.text(),
+            app: snap.app,
+            window_title: snap.window_title,
+            text_source: snap.source,
+            image: None,
+            image_size: None,
+            image_error,
+        }
+    }
+
+    /// "App — window title" for the prompt.
+    pub fn label(&self) -> String {
+        match (self.app.trim(), self.window_title.trim()) {
+            ("", "") => String::new(),
+            (a, "") => a.to_string(),
+            ("", t) => t.to_string(),
+            (a, t) => format!("{a} — {t}"),
+        }
+    }
+}
+
+/// An image for a vision model: raw bytes of an encoded image plus its media type.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PromptImage {
+    /// "image/jpeg" or "image/png".
+    pub mime: String,
+    pub data: Vec<u8>,
+}
+
+impl PromptImage {
+    pub fn base64(&self) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::STANDARD.encode(&self.data)
+    }
+    pub fn data_url(&self) -> String {
+        format!("data:{};base64,{}", self.mime, self.base64())
+    }
+}
+
+impl std::fmt::Debug for PromptImage {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "PromptImage({}, {} bytes)", self.mime, self.data.len())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

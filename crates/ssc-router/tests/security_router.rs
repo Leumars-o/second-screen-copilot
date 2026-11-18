@@ -35,6 +35,7 @@ fn prompt() -> Prompt {
         max_tokens: 60,
         temperature: 0.2,
         stop: vec![],
+        images: vec![],
     }
 }
 

@@ -120,11 +120,16 @@ impl Ollama {
         if !p.stop.is_empty() {
             options["stop"] = json!(p.stop);
         }
+        let mut user = json!({ "role": "user", "content": p.dynamic });
+        if !p.images.is_empty() {
+            // Ollama's chat API: base64 images on the message (multimodal models only).
+            user["images"] = json!(p.images.iter().map(|i| i.base64()).collect::<Vec<_>>());
+        }
         let mut b = json!({
             "model": self.model,
             "messages": [
                 { "role": "system", "content": p.prefix },
-                { "role": "user", "content": p.dynamic },
+                user,
             ],
             "stream": true,
             "keep_alive": self.keep_alive,
@@ -151,7 +156,14 @@ impl Ollama {
 
     /// Evaluate `prefix` once (one output token) so the next answer reuses its KV cache.
     pub async fn warm_prefix(&self, prefix: &str) -> Result<()> {
-        let p = Prompt { prefix: prefix.into(), dynamic: String::new(), max_tokens: 1, temperature: 0.0, stop: vec![] };
+        let p = Prompt {
+            prefix: prefix.into(),
+            dynamic: String::new(),
+            max_tokens: 1,
+            temperature: 0.0,
+            stop: vec![],
+            images: vec![],
+        };
         let (tx, mut rx) = mpsc::channel(8);
         let drain = tokio::spawn(async move { while rx.recv().await.is_some() {} });
         let r = self.stream(&p, tx, Cancel::new()).await.map(|_| ());
@@ -219,9 +231,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn images_go_on_the_user_message() {
+        let o = Ollama::new("http://127.0.0.1:11434/", "gemma4:e2b");
+        let p = Prompt {
+            prefix: "P".into(),
+            dynamic: "D".into(),
+            max_tokens: 10,
+            temperature: 0.2,
+            stop: vec![],
+            images: vec![ssc_core::types::PromptImage {
+                mime: "image/jpeg".into(),
+                data: vec![0xFF, 0xD8, 0xFF, 0xD9],
+            }],
+        };
+        let b = o.body(&p);
+        assert_eq!(b["messages"][1]["images"], json!(["/9j/2Q=="]));
+        assert!(o.body(&Prompt { images: vec![], ..p })["messages"][1].get("images").is_none());
+    }
+
+    #[test]
     fn body_keeps_prefix_first_and_keep_alive() {
         let o = Ollama::new("http://127.0.0.1:11434/", "gemma4:e2b");
-        let p = Prompt { prefix: "FIXED".into(), dynamic: "Q".into(), max_tokens: 60, temperature: 0.2, stop: vec![] };
+        let p = Prompt {
+            prefix: "FIXED".into(),
+            dynamic: "Q".into(),
+            max_tokens: 60,
+            temperature: 0.2,
+            stop: vec![],
+            images: vec![],
+        };
         let b = o.body(&p);
         assert_eq!(b["messages"][0]["role"], "system");
         assert_eq!(b["messages"][0]["content"], "FIXED");

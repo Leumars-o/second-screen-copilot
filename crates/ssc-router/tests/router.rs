@@ -23,6 +23,7 @@ fn prompt() -> Prompt {
         max_tokens: 60,
         temperature: 0.2,
         stop: vec![],
+        images: vec![],
     }
 }
 
@@ -277,6 +278,7 @@ async fn answer(
                     max_tokens: 200,
                     temperature: 0.2,
                     stop: vec![],
+                    images: vec![],
                 }
             },
             tx,
@@ -373,7 +375,14 @@ async fn speculative_keep_or_restart() {
             let model = model.clone();
             async move {
                 let (tx, _rx) = mpsc::channel(64);
-                let p = Prompt { prefix: String::new(), dynamic: text, max_tokens: 60, temperature: 0.2, stop: vec![] };
+                let p = Prompt {
+                    prefix: String::new(),
+                    dynamic: text,
+                    max_tokens: 60,
+                    temperature: 0.2,
+                    stop: vec![],
+                    images: vec![],
+                };
                 model.stream(&p, tx, cancel).await.map(|_| p.dynamic)
             }
         }

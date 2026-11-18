@@ -58,7 +58,8 @@ fn rig(decision: MockDecision, gate: bool) -> Rig {
         clock: clock.clone(),
         timing: timing.clone(),
     };
-    let mut settings = Settings::new(Default::default());
+    // These tests cover continuous screen reading (screen diff → decision), opt-in since CR-20.
+    let mut settings = Settings::new(ssc_core::config::Config { screen_watch: true, ..Default::default() });
     settings.screen_poll = Duration::from_millis(250);
     Rig { pipeline: Pipeline::new(parts, settings), phone, timing, answer, postcall, memory, decision }
 }

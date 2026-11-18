@@ -42,8 +42,12 @@ struct Inner {
 /// Conservative token estimate for one call: ~4 bytes per input token plus the full output cap.
 pub fn estimate_tokens(p: &Prompt) -> u32 {
     let input = (p.prefix.len() + p.dynamic.len()).div_ceil(4) as u32;
-    input.saturating_add(p.max_tokens)
+    let images = IMAGE_TOKENS_ESTIMATE.saturating_mul(p.images.len() as u32);
+    input.saturating_add(images).saturating_add(p.max_tokens)
 }
+
+/// Rough input-token cost of one screenshot (≤1600 px long edge) for the rate budget (CR-20).
+pub const IMAGE_TOKENS_ESTIMATE: u32 = 1_600;
 
 impl BudgetTracker {
     pub fn new(limits: GroqBudget, clock: Arc<dyn Clock>) -> Self {
@@ -211,8 +215,14 @@ mod tests {
 
     #[test]
     fn estimate() {
-        let p =
-            Prompt { prefix: "a".repeat(400), dynamic: "b".repeat(3), max_tokens: 60, temperature: 0.0, stop: vec![] };
+        let p = Prompt {
+            prefix: "a".repeat(400),
+            dynamic: "b".repeat(3),
+            max_tokens: 60,
+            temperature: 0.0,
+            stop: vec![],
+            images: vec![],
+        };
         assert_eq!(estimate_tokens(&p), 101 + 60);
     }
 }

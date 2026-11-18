@@ -488,7 +488,14 @@ mod tests {
     async fn answer_mock_streams_and_cancels() {
         let m = MockAnswer::cue_answer("fast", true);
         let (tx, mut rx) = mpsc::channel(16);
-        let p = Prompt { prefix: "p".into(), dynamic: "d".into(), max_tokens: 40, temperature: 0.2, stop: vec![] };
+        let p = Prompt {
+            prefix: "p".into(),
+            dynamic: "d".into(),
+            max_tokens: 40,
+            temperature: 0.2,
+            stop: vec![],
+            images: vec![],
+        };
         let stats = m.stream(&p, tx, CancellationToken::new()).await.unwrap();
         assert_eq!(stats.tokens_out, 5);
         assert_eq!(stats.first_token_ms, Some(300));
@@ -504,8 +511,14 @@ mod tests {
     async fn answer_mock_fails_before_first_token() {
         let m = MockAnswer::cue_answer("groq", true).failing(MockOutcome::RateLimited);
         let (tx, mut rx) = mpsc::channel(16);
-        let p =
-            Prompt { prefix: String::new(), dynamic: String::new(), max_tokens: 40, temperature: 0.0, stop: vec![] };
+        let p = Prompt {
+            prefix: String::new(),
+            dynamic: String::new(),
+            max_tokens: 40,
+            temperature: 0.0,
+            stop: vec![],
+            images: vec![],
+        };
         assert!(matches!(m.stream(&p, tx, CancellationToken::new()).await, Err(SscError::RateLimited { .. })));
         assert!(rx.recv().await.is_none());
     }

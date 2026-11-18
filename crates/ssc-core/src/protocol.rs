@@ -56,6 +56,8 @@ pub enum AnswerFormat {
     Cue,
     Fact,
     Objection,
+    /// CR-20: screen hotkey. Free-text answer (block `cue`), then working lines (block `detail`).
+    Screen,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

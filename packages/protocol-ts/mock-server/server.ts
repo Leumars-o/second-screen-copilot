@@ -34,7 +34,7 @@ export interface MockPcOptions {
 }
 
 export interface StreamAnswerOptions {
-  deltas?: string[];
+  deltas?: (string | { block: "cue" | "detail"; text: string })[];
   count?: number;
   intervalMs?: number;
   urgency?: AnswerStart["urgency"];
@@ -288,9 +288,11 @@ export class MockPc {
       type: "answer.start",
       payload: { answer_id, trigger: o.trigger ?? "question", format: o.format ?? "cue", intent: "technical", urgency: o.urgency ?? "high", model: "mock/fast" },
     });
-    for (const text of deltas) {
+    for (const d of deltas) {
       if (o.intervalMs) await new Promise((r) => setTimeout(r, o.intervalMs));
-      await this.send({ type: "answer.delta", payload: { answer_id, block: o.block ?? "cue", text } });
+      // A delta is text in `o.block`, or { block, text } (e.g. a screen answer then its working).
+      const { block, text } = typeof d === "string" ? { block: o.block ?? "cue", text: d } : d;
+      await this.send({ type: "answer.delta", payload: { answer_id, block, text } });
     }
     await this.send({ type: "answer.end", payload: { answer_id, ...DEFAULT_END, ...o.end } });
     return answer_id;

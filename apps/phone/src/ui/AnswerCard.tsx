@@ -26,14 +26,15 @@ function StreamBody({ copilot, answer, showCue }: { copilot: Copilot; answer: An
   );
 }
 
-const FORMAT_LABEL = { cue: "Cues", fact: "Fact", objection: "Objection" } as const;
+const FORMAT_LABEL = { cue: "Cues", fact: "Fact", objection: "Objection", screen: "Screen" } as const;
 
 export function AnswerCard({ copilot, answer, current }: { copilot: Copilot; answer: Answer; current: boolean }) {
   const end = answer.end;
-  const structured = !!end && end.cues.length > 0;
+  // CR-20: a screen answer is free text (answer, then working), shown as streamed.
+  const structured = !!end && end.cues.length > 0 && answer.start.format !== "screen";
   return (
     <article
-      className={`card${current ? " card-current" : ""}${answer.pinned ? " card-pinned" : ""}`}
+      className={`card card-${answer.start.format}${current ? " card-current" : ""}${answer.pinned ? " card-pinned" : ""}`}
       data-testid={current ? "answer-current" : "answer"}
       data-answer-id={answer.id}
       data-state={end ? "done" : "streaming"}

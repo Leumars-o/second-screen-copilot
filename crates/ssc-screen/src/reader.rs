@@ -1,7 +1,7 @@
 //! [`ScreenReader`]: the [`ScreenSource`] implementation. Accessibility first; OCR on changed
 //! regions only when the accessibility text is empty or under [`OCR_MIN_CHARS`] characters.
 
-use crate::ocr::{FrameSource, OcrCache, OcrEngine, lines_to_nodes};
+use crate::ocr::{ColorSource, FrameSource, OcrCache, OcrEngine, lines_to_nodes};
 use crate::walk::{WalkLimits, WalkOutput};
 use ssc_core::Result;
 use ssc_core::traits::{Clock, ScreenSource, SystemClock};
@@ -36,13 +36,19 @@ struct Ocr {
 pub struct ScreenReader {
     ax: Box<dyn AxBackend>,
     ocr: Option<Ocr>,
+    color: Option<Box<dyn ColorSource>>,
     limits: WalkLimits,
     clock: Arc<dyn Clock>,
 }
 
 impl ScreenReader {
     pub fn new(ax: Box<dyn AxBackend>) -> Self {
-        Self { ax, ocr: None, limits: WalkLimits::default(), clock: Arc::new(SystemClock) }
+        Self { ax, ocr: None, color: None, limits: WalkLimits::default(), clock: Arc::new(SystemClock) }
+    }
+    /// Enables colour capture for [`Self::grab`] (CR-20).
+    pub fn with_color(mut self, color: Box<dyn ColorSource>) -> Self {
+        self.color = Some(color);
+        self
     }
     /// Enables the OCR fallback.
     pub fn with_ocr(mut self, frames: Box<dyn FrameSource>, engine: Box<dyn OcrEngine>) -> Self {
@@ -81,9 +87,40 @@ impl ScreenReader {
     }
 }
 
-impl ScreenSource for ScreenReader {
-    fn snapshot(&self) -> Result<ScreenSnapshot> {
+impl ScreenReader {
+    /// CR-20 screen hotkey: the focused window right now. With `image`, a JPEG of the window
+    /// (at most [`crate::grab::GRAB_MAX_EDGE`] px) plus its accessibility text, no OCR (the
+    /// model reads the image). Without `image`, or if the capture fails, the text with the
+    /// usual OCR fallback.
+    pub fn grab_window(&self, image: bool) -> Result<crate::grab::ScreenGrab> {
         let read = self.ax.read_focused(&self.limits)?;
+        let bounds = read.bounds.filter(|b| b.w > 0 && b.h > 0);
+        let mut capture_error = None;
+        if image {
+            match (&self.color, bounds) {
+                (Some(c), Some(b)) => match c.capture_color(b, crate::grab::GRAB_MAX_EDGE) {
+                    Ok(frame) => {
+                        let jpeg = crate::grab::encode_jpeg(&frame, crate::grab::JPEG_QUALITY)?;
+                        let snap = ScreenSnapshot {
+                            app: read.app,
+                            window_title: read.window_title,
+                            nodes: read.walk.nodes,
+                            source: ScreenTextSource::Accessibility,
+                            captured_at_ms: self.clock.now_ms(),
+                        };
+                        return Ok(crate::grab::make_grab(snap, Some((frame.width, frame.height, jpeg)), None));
+                    }
+                    Err(e) => capture_error = Some(e.to_string()),
+                },
+                (None, _) => capture_error = Some("no colour capture on this platform".into()),
+                (_, None) => capture_error = Some("focused window has no bounds".into()),
+            }
+        }
+        let snap = self.snapshot_from(read);
+        Ok(crate::grab::make_grab(snap, None, capture_error))
+    }
+
+    fn snapshot_from(&self, read: WindowRead) -> ScreenSnapshot {
         let chars: usize = read.walk.nodes.iter().map(|n| n.text.chars().filter(|c| !c.is_whitespace()).count()).sum();
         if chars < OCR_MIN_CHARS
             && let Some(ocr) = &self.ocr
@@ -91,15 +128,25 @@ impl ScreenSource for ScreenReader {
             // accessibility text, however short, is still returned.
             && let Ok(Some(snap)) = self.try_ocr(ocr, &read)
         {
-            return Ok(snap);
+            return snap;
         }
-        Ok(ScreenSnapshot {
+        ScreenSnapshot {
             app: read.app,
             window_title: read.window_title,
             nodes: read.walk.nodes,
             source: ScreenTextSource::Accessibility,
             captured_at_ms: self.clock.now_ms(),
-        })
+        }
+    }
+}
+
+impl ScreenSource for ScreenReader {
+    fn snapshot(&self) -> Result<ScreenSnapshot> {
+        let read = self.ax.read_focused(&self.limits)?;
+        Ok(self.snapshot_from(read))
+    }
+    fn grab(&self, image: bool) -> Result<crate::grab::ScreenGrab> {
+        self.grab_window(image)
     }
 }
 

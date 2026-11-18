@@ -107,11 +107,19 @@ impl OpenAiCompat {
     }
 
     pub fn body(&self, p: &Prompt) -> Value {
+        // CR-20: images go in the user turn as `image_url` parts (data URLs); text stays first.
+        let user = if p.images.is_empty() {
+            json!(p.dynamic)
+        } else {
+            let mut parts = vec![json!({ "type": "text", "text": p.dynamic })];
+            parts.extend(p.images.iter().map(|i| json!({ "type": "image_url", "image_url": { "url": i.data_url() } })));
+            Value::Array(parts)
+        };
         let mut b = json!({
             "model": self.model,
             "messages": [
                 { "role": "system", "content": p.prefix },
-                { "role": "user", "content": p.dynamic },
+                { "role": "user", "content": user },
             ],
             "stream": true,
             "max_tokens": p.max_tokens.saturating_add(self.reasoning_headroom),
@@ -221,6 +229,31 @@ impl StreamParser for ChatSse {
 mod tests {
     use super::*;
 
+    #[test]
+    fn images_ride_in_the_user_turn_as_data_urls() {
+        let o = OpenAiCompat::groq(GROQ_BASE_URL, "qwen/qwen3.8-27b", Secret::new("k"));
+        let p = Prompt {
+            prefix: "P".into(),
+            dynamic: "D".into(),
+            max_tokens: 10,
+            temperature: 0.2,
+            stop: vec![],
+            images: vec![ssc_core::types::PromptImage {
+                mime: "image/jpeg".into(),
+                data: vec![0xFF, 0xD8, 0xFF, 0xD9],
+            }],
+        };
+        let b = o.body(&p);
+        assert_eq!(b["messages"][0]["content"], "P", "system stays plain text");
+        let u = &b["messages"][1]["content"];
+        assert_eq!(u[0], json!({ "type": "text", "text": "D" }));
+        assert_eq!(u[1]["type"], "image_url");
+        assert_eq!(u[1]["image_url"]["url"], "data:image/jpeg;base64,/9j/2Q==");
+        // No images: plain string content as before.
+        let b = o.body(&Prompt { images: vec![], ..p });
+        assert_eq!(b["messages"][1]["content"], "D");
+    }
+
     fn prompt() -> Prompt {
         Prompt {
             prefix: "P".into(),
@@ -228,6 +261,7 @@ mod tests {
             max_tokens: 80,
             temperature: 0.2,
             stop: vec!["\n\n\n".into()],
+            images: vec![],
         }
     }
 

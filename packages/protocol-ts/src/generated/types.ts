@@ -82,7 +82,7 @@ export interface AnswerEnd {
 export interface AnswerStart {
   answer_id: string;
   trigger: "hotkey" | "question" | "screen" | "timer" | "command";
-  format: "cue" | "fact" | "objection";
+  format: "cue" | "fact" | "objection" | "screen";
   intent: "pricing" | "objection" | "technical" | "scheduling" | "small_talk" | "none";
   urgency: "low" | "medium" | "high";
   model: string;

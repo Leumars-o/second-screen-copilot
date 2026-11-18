@@ -399,6 +399,31 @@ async fn run_loop_fires_question_after_silence_window() {
     task.await.unwrap();
 }
 
+/// Regression (CR-20): the inputs closing (the transcript stream ended, no screen loop holding a
+/// sender) must not drop a question still in its silence window. The loop used to exit at once.
+#[tokio::test(start_paused = true)]
+async fn run_loop_still_fires_a_pending_question_after_inputs_close() {
+    let d = Arc::new(MockDecision::always(decision_answer(Intent::Pricing, "sales")));
+    let clock = Arc::new(TokioClock(tokio::time::Instant::now()));
+    let e = Arc::new(TriggerEngine::new(settings(Mode::Cloud), d, clock.clone()));
+    let (in_tx, in_rx) = mpsc::channel(16);
+    let (out_tx, mut out_rx) = mpsc::channel(16);
+    let task = e.spawn(in_rx, out_tx, CancellationToken::new());
+    let start = tokio::time::Instant::now();
+    let seg = TranscriptSegment {
+        t1_ms: clock.now_ms(),
+        t0_ms: clock.now_ms() - 1000,
+        ..them_end(&MockClock::new(T0), "How much is it?")
+    };
+    in_tx.send(TriggerInput::Transcript(seg)).await.unwrap();
+    drop(in_tx); // closed while the question waits out its silence window
+    let ev = out_rx.recv().await.expect("pending question fired");
+    assert_eq!(ev.trigger, Trigger::Question);
+    assert_eq!(start.elapsed(), Duration::from_millis(300));
+    // Nothing left pending: the loop ends by itself.
+    tokio::time::timeout(Duration::from_secs(5), task).await.expect("loop exits").unwrap();
+}
+
 // ---------- dedupe ----------
 
 #[tokio::test]

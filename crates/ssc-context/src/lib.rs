@@ -68,17 +68,20 @@ pub enum PromptKind {
     Expand,
     Summary,
     Followup,
+    /// CR-20: the screen hotkey.
+    Screen,
 }
 
 impl PromptKind {
-    pub const ALL: [PromptKind; 6] =
-        [Self::Cue, Self::Fact, Self::Objection, Self::Expand, Self::Summary, Self::Followup];
+    pub const ALL: [PromptKind; 7] =
+        [Self::Cue, Self::Fact, Self::Objection, Self::Expand, Self::Summary, Self::Followup, Self::Screen];
 
     pub fn for_format(f: AnswerFormat) -> Self {
         match f {
             AnswerFormat::Cue => Self::Cue,
             AnswerFormat::Fact => Self::Fact,
             AnswerFormat::Objection => Self::Objection,
+            AnswerFormat::Screen => Self::Screen,
         }
     }
 
@@ -90,6 +93,7 @@ impl PromptKind {
             Self::Expand => include_str!("../../../contracts/prompts/expand.v1.md"),
             Self::Summary => include_str!("../../../contracts/prompts/summary.v1.md"),
             Self::Followup => include_str!("../../../contracts/prompts/followup.v1.md"),
+            Self::Screen => include_str!("../../../contracts/prompts/screen.v1.md"),
         }
     }
 
@@ -108,6 +112,7 @@ impl PromptKind {
             Self::Expand => 400,
             Self::Summary => 700,
             Self::Followup => 350,
+            Self::Screen => 400,
         }
     }
 
@@ -298,6 +303,8 @@ pub struct Budget {
     /// (the newest segment is always kept).
     pub transcript_window_ms: u64,
     pub screen: usize,
+    /// CR-20: window text for the screen hotkey (`PromptKind::Screen`).
+    pub screen_grab: usize,
     pub question: usize,
     pub answer: usize,
     pub session: usize,
@@ -318,6 +325,7 @@ impl Budget {
             transcript: 700,
             transcript_window_ms: 90_000,
             screen: 500,
+            screen_grab: 1500,
             question: 200,
             answer: 300,
             session: 6000,
@@ -337,6 +345,7 @@ impl Budget {
             transcript: 60,
             transcript_window_ms: 60_000,
             screen: 30,
+            screen_grab: 400,
             question: 40,
             answer: 80,
             session: 150,
@@ -670,7 +679,9 @@ pub fn assemble(kind: PromptKind, input: &ContextInput, budget: &Budget) -> Asse
         };
         v.transcript = transcript;
         // Screen diff is newest first: keep the head. Question: keep the end (the actual ask).
-        v.screen = if uses(Slot::Screen) { truncate_head(input.screen.trim(), b.screen) } else { String::new() };
+        // The screen hotkey's window text is the main input, not a context diff (CR-20).
+        let screen_budget = if kind == PromptKind::Screen { b.screen_grab } else { b.screen };
+        v.screen = if uses(Slot::Screen) { truncate_head(input.screen.trim(), screen_budget) } else { String::new() };
         v.question = truncate_tail(input.question.trim(), b.question);
         v.answer = truncate_head(input.answer.trim(), b.answer);
         v.session = truncate_tail(input.session.trim(), b.session);
@@ -683,6 +694,7 @@ pub fn assemble(kind: PromptKind, input: &ContextInput, budget: &Budget) -> Asse
                 max_tokens: kind.max_tokens(),
                 temperature: kind.temperature(),
                 stop: vec![],
+                images: vec![],
             },
             chunks_dropped: input.chunks.len() - chunks_used.len(),
             chunks_used,

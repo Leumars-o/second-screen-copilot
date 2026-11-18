@@ -4,7 +4,7 @@
 //! calls return [`SscError::Unavailable`]; nothing here prompts the user.
 #![allow(unsafe_code)] // FFI to ApplicationServices, CoreGraphics, ScreenCaptureKit and Vision.
 
-use crate::ocr::{Frame, FrameSource, OcrEngine, OcrLine, PxRect};
+use crate::ocr::{ColorSource, Frame, FrameSource, OcrEngine, OcrLine, PxRect, RgbFrame};
 use crate::reader::{AxBackend, WindowRead};
 use crate::walk::{AxNode, WalkLimits, walk};
 use accessibility_sys::*;
@@ -289,6 +289,42 @@ fn cgimage_to_gray(img: &CGImage) -> Result<(u32, u32, Vec<u8>)> {
     Ok((w32, h32, gray))
 }
 
+/// Renders a `CGImage` into an RGB buffer of `w x h` pixels (CoreGraphics scales and colour-
+/// manages), for the CR-20 screen hotkey.
+fn cgimage_to_rgb(img: &CGImage, max_edge: u32) -> Result<RgbFrame> {
+    let (sw, sh) = (CGImage::width(Some(img)), CGImage::height(Some(img)));
+    let (Ok(sw), Ok(sh)) = (u32::try_from(sw), u32::try_from(sh)) else {
+        return Err(SscError::Invalid("capture too large".into()));
+    };
+    if sw == 0 || sh == 0 {
+        return Err(SscError::Unavailable("empty capture".into()));
+    }
+    let (w, h) = crate::grab::fit_within(sw, sh, max_edge);
+    let (wu, hu) = (w as usize, h as usize);
+    let mut rgba = vec![0u8; wu * hu * 4];
+    let cs = CGColorSpace::new_device_rgb();
+    // SAFETY: `rgba` is w*h*4 bytes, bytes_per_row = 4w, 8 bpc RGBA premultiplied-last; it
+    // outlives the context.
+    let ctx = unsafe {
+        CGBitmapContextCreate(
+            rgba.as_mut_ptr().cast(),
+            wu,
+            hu,
+            8,
+            wu * 4,
+            cs.as_deref(),
+            CGImageAlphaInfo::PremultipliedLast.0,
+        )
+    }
+    .ok_or_else(|| SscError::Unavailable("CGBitmapContextCreate failed".into()))?;
+    CGContext::set_interpolation_quality(Some(&ctx), objc2_core_graphics::CGInterpolationQuality::High);
+    let full = CGRect { origin: CGPoint { x: 0.0, y: 0.0 }, size: CGSize { width: w as f64, height: h as f64 } };
+    CGContext::draw_image(Some(&ctx), full, Some(img));
+    drop(ctx);
+    let rgb: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]).collect();
+    Ok(RgbFrame { width: w, height: h, rgb })
+}
+
 /// Captures a screen rectangle with ScreenCaptureKit (`SCScreenshotManager.captureImage(in:)`,
 /// macOS 15.2+). Needs Screen Recording, the same permission `ssc-audio` uses for system audio.
 /// The rect is in global display points, like accessibility bounds; the image comes back at the
@@ -309,6 +345,22 @@ impl FrameSource for SckCapture {
         let cg: &CGImage = unsafe { &*img.as_ptr().cast::<CGImage>() };
         let (width, height, gray) = cgimage_to_gray(cg)?;
         Ok(Frame { screen: window, width, height, gray })
+    }
+}
+
+impl ColorSource for SckCapture {
+    fn capture_color(&self, window: Rect, max_edge: u32) -> Result<RgbFrame> {
+        check_capture_access(window)?;
+        let rect =
+            screencapturekit::cg::CGRect::new(window.x.into(), window.y.into(), window.w.into(), window.h.into());
+        let img = SCScreenshotManager::capture_image_in_rect(rect)
+            .map_err(|e| SscError::Unavailable(format!("ScreenCaptureKit capture failed: {e}")))?;
+        if img.as_ptr().is_null() {
+            return Err(SscError::Unavailable("ScreenCaptureKit returned no image".into()));
+        }
+        // SAFETY: `as_ptr` is a live, retained CGImageRef owned by `img`, which outlives `cg`.
+        let cg: &CGImage = unsafe { &*img.as_ptr().cast::<CGImage>() };
+        cgimage_to_rgb(cg, max_edge)
     }
 }
 
@@ -410,6 +462,27 @@ impl OcrEngine for VisionOcr {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rgb_render_scales_down_and_keeps_colour_values() {
+        // 3200x40 gray image, left half black, right half white.
+        let (w, h) = (3200u32, 40u32);
+        let mut gray = vec![0u8; (w * h) as usize];
+        for row in gray.chunks_exact_mut(w as usize) {
+            row[(w / 2) as usize..].fill(255);
+        }
+        let img = gray_image(&gray, w, h).unwrap();
+        let f = cgimage_to_rgb(&img, 1600).unwrap();
+        assert_eq!((f.width, f.height), (1600, 20));
+        assert_eq!(f.rgb.len(), 1600 * 20 * 3);
+        let px = |x: usize, y: usize| &f.rgb[(y * 1600 + x) * 3..(y * 1600 + x) * 3 + 3];
+        assert!(px(100, 10).iter().all(|&v| v < 10), "{:?}", px(100, 10));
+        assert!(px(1500, 10).iter().all(|&v| v > 245), "{:?}", px(1500, 10));
+        // Small images are not upscaled.
+        let small = gray_image(&[128u8; 64 * 32], 64, 32).unwrap();
+        let f = cgimage_to_rgb(&small, 1600).unwrap();
+        assert_eq!((f.width, f.height), (64, 32));
+    }
     use ssc_core::traits::ScreenSource;
 
     /// The OCR engine runs without any permission. A blank image yields no text (and no crash).

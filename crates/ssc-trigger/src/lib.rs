@@ -619,15 +619,24 @@ impl TriggerEngine {
         cancel: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         tokio::spawn(async move {
+            // Inputs closed (e.g. the transcript stream ended): keep serving pending deadlines
+            // (a question still in its silence window, a screen change settling) before exiting.
+            let mut closed = false;
             loop {
-                let wait = self
-                    .next_deadline_ms()
+                let next = self.next_deadline_ms();
+                if closed && next.is_none() {
+                    break;
+                }
+                let wait = next
                     .map(|d| Duration::from_millis(d.saturating_sub(self.clock.now_ms())))
                     .unwrap_or(Duration::from_secs(3600));
                 let input = tokio::select! {
                     _ = cancel.cancelled() => break,
-                    input = rx.recv() => match input {
-                        None => break,
+                    input = rx.recv(), if !closed => match input {
+                        None => {
+                            closed = true;
+                            None
+                        }
                         Some(i) => Some(i),
                     },
                     _ = tokio::time::sleep(wait) => None,

@@ -150,6 +150,7 @@ impl PipelineDriver for MockPipeline {
                 max_tokens: 160,
                 temperature: 0.2,
                 stop: vec![],
+                images: vec![],
             };
             let (tx, mut rx) = mpsc::channel(64);
             let stream = self.answer.stream(&prompt, tx, Cancel::new());

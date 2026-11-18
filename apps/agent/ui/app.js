@@ -56,7 +56,7 @@ async function refreshState() {
     ? `Speech-to-text: ${state.stt || "none"} · screen reader: ${state.screen_available ? "on" : "unavailable"}`
     : "";
   const h = state.config.hotkeys;
-  $("#hotkeys").textContent = `Hotkeys: capture ${h.capture_toggle} · answer now ${h.answer_now} · hide tray ${h.tray_toggle}`;
+  $("#hotkeys").textContent = `Hotkeys: capture ${h.capture_toggle} · answer now ${h.answer_now} · answer from screen ${h.screen_answer} · hide tray ${h.tray_toggle}`;
   $("#phone-info").textContent = state.phone ? `Paired: ${state.phone} — ${state.link ?? ""}` : "No phone paired.";
   $("#lan-tls").textContent = lanTlsText(state.lan_tls);
   const dl = $("#download");
@@ -80,7 +80,7 @@ function lanTlsText(/** @type {any} */ t) {
 function renderSettings() {
   const f = form("#settings");
   const c = state.config;
-  for (const k of ["mode", "redaction", "redact_emails", "keep_transcripts", "relay_url", "lan_domain", "pwa_url", "lan_port", "testing"]) {
+  for (const k of ["mode", "redaction", "redact_emails", "keep_transcripts", "screen_watch", "relay_url", "lan_domain", "pwa_url", "lan_port", "testing"]) {
     setField(f, k, c[k]);
   }
   for (const k of ["gemini_tier", "strong_model", "strong_base_url", "decision_cloud_base_url"]) setField(f, k, c.models[k]);
@@ -264,7 +264,7 @@ form("#settings").onsubmit = async (e) => {
   e.preventDefault();
   const f = form("#settings");
   const c = structuredClone(state.config);
-  for (const k of ["mode", "redaction", "redact_emails", "keep_transcripts", "testing"]) c[k] = getField(f, k);
+  for (const k of ["mode", "redaction", "redact_emails", "keep_transcripts", "screen_watch", "testing"]) c[k] = getField(f, k);
   for (const k of ["relay_url", "lan_domain", "pwa_url"]) c[k] = getField(f, k) || null;
   c.lan_port = Number(getField(f, "lan_port"));
   c.models.gemini_tier = getField(f, "gemini_tier");

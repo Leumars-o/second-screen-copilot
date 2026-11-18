@@ -418,6 +418,7 @@ mod tests {
             max_tokens: 60,
             temperature: 0.2,
             stop: vec![],
+            images: vec![],
         };
         let (a, c) = redact_prompt(&p, Options::default());
         let (b, _) = redact_prompt(&p, Options::default());

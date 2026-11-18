@@ -71,6 +71,8 @@ h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .stream-cue { font-size: 26px; line-height: 1.3; font-weight: 600; }
 .stream-detail { font-size: 19px; line-height: 1.4; color: #d6dbe1; }
 .stream:empty { display: none; }
+.card-screen .stream-cue { font-size: 24px; }
+.card-screen .stream-detail { margin-top: 8px; font-size: 17px; }
 
 .cues { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .cue {

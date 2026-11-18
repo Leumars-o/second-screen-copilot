@@ -11,6 +11,7 @@
 //! Screen text is untrusted data (Build Sheet §3.8): this crate only reads it.
 
 pub mod diff;
+pub mod grab;
 pub mod ocr;
 pub mod reader;
 pub mod walk;
@@ -21,6 +22,7 @@ pub mod macos;
 pub mod windows_backend;
 
 pub use diff::diff;
+pub use grab::ScreenGrab;
 pub use reader::{AxBackend, OCR_MIN_CHARS, ScreenDiffer, ScreenReader, WindowRead};
 pub use walk::{AxNode, WalkLimits, WalkOutput};
 
@@ -32,7 +34,8 @@ pub fn platform_reader() -> Result<ScreenReader> {
     #[cfg(target_os = "macos")]
     {
         Ok(ScreenReader::new(Box::new(macos::AxReader::new()))
-            .with_ocr(Box::new(macos::SckCapture), Box::new(macos::VisionOcr)))
+            .with_ocr(Box::new(macos::SckCapture), Box::new(macos::VisionOcr))
+            .with_color(Box::new(macos::SckCapture)))
     }
     #[cfg(target_os = "windows")]
     {

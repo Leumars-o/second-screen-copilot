@@ -8,6 +8,8 @@ description = "Focused-window screen reader (UI Automation / AXUIElement, OCR fa
 
 [dependencies]
 ssc-core.workspace = true
+# CR-20: screenshots for vision models (pure Rust).
+jpeg-encoder = "0.6"
 anyhow.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]

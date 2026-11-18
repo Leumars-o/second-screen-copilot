@@ -69,7 +69,7 @@ impl Anthropic {
             "model": self.model,
             "max_tokens": p.max_tokens.saturating_add(THINKING_HEADROOM),
             "system": [ { "type": "text", "text": p.prefix, "cache_control": { "type": "ephemeral" } } ],
-            "messages": [ { "role": "user", "content": p.dynamic } ],
+            "messages": [ { "role": "user", "content": user_content(p) } ],
             "thinking": { "type": "adaptive", "display": "omitted" },
             "output_config": { "effort": self.effort },
             "stream": true,
@@ -79,6 +79,20 @@ impl Anthropic {
         }
         b
     }
+}
+
+/// The user turn: plain text, or (CR-20) image blocks followed by the text.
+fn user_content(p: &Prompt) -> Value {
+    if p.images.is_empty() {
+        return json!(p.dynamic);
+    }
+    let mut blocks: Vec<Value> = p
+        .images
+        .iter()
+        .map(|i| json!({ "type": "image", "source": { "type": "base64", "media_type": i.mime, "data": i.base64() } }))
+        .collect();
+    blocks.push(json!({ "type": "text", "text": p.dynamic }));
+    Value::Array(blocks)
 }
 
 #[async_trait]
@@ -153,9 +167,38 @@ mod tests {
     use super::*;
 
     #[test]
+    fn images_become_base64_image_blocks_before_the_text() {
+        let a = Anthropic::new(ANTHROPIC_BASE_URL, DEFAULT_CLAUDE_MODEL, Secret::new("k"));
+        let p = Prompt {
+            prefix: "P".into(),
+            dynamic: "D".into(),
+            max_tokens: 10,
+            temperature: 0.2,
+            stop: vec![],
+            images: vec![ssc_core::types::PromptImage {
+                mime: "image/jpeg".into(),
+                data: vec![0xFF, 0xD8, 0xFF, 0xD9],
+            }],
+        };
+        let c = &a.body(&p)["messages"][0]["content"];
+        assert_eq!(
+            c[0],
+            json!({ "type": "image", "source": { "type": "base64", "media_type": "image/jpeg", "data": "/9j/2Q==" } })
+        );
+        assert_eq!(c[1], json!({ "type": "text", "text": "D" }));
+    }
+
+    #[test]
     fn body_caches_prefix() {
         let a = Anthropic::new(ANTHROPIC_BASE_URL, DEFAULT_CLAUDE_MODEL, Secret::new("k"));
-        let p = Prompt { prefix: "P".into(), dynamic: "D".into(), max_tokens: 300, temperature: 0.2, stop: vec![] };
+        let p = Prompt {
+            prefix: "P".into(),
+            dynamic: "D".into(),
+            max_tokens: 300,
+            temperature: 0.2,
+            stop: vec![],
+            images: vec![],
+        };
         let b = a.body(&p);
         assert_eq!(b["model"], "claude-opus-5-5");
         assert_eq!(b["system"][0]["text"], "P");
