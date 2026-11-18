@@ -1,0 +1,10 @@
+// Phone PWA hosting: a Workers static-assets site (Cloudflare's successor to Pages).
+// Build first (`pnpm run build`), then `wrangler deploy` from this folder (wrangler needs Node 22.12+).
+// out/_headers (CSP etc.) is applied by the assets runtime. The custom domain must match
+// `pwa_url` in the agent config and sit under `lan_domain`'s parent so the LAN Origin check passes.
+{
+  "name": "ssc-phone",
+  "compatibility_date": "2026-11-01",
+  "assets": { "directory": "./out", "not_found_handling": "404-page" },
+  "routes": [{ "pattern": "app.live-preview.space", "custom_domain": true }]
+}
