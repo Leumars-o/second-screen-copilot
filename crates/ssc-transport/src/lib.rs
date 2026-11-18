@@ -124,6 +124,7 @@ impl TransportConfig {
 ///   `https://example.com`, `https://*.example.com`;
 /// - the relay host exactly (`https://<relay host>`); never its parent, which could be a shared
 ///   hosting suffix such as `workers.dev`;
+/// - the origin of `pwa_url` exactly (CR-19), wherever the phone app is hosted;
 /// - plus the comma-separated `$SSC_PWA_ORIGINS` for a PWA hosted elsewhere.
 ///
 /// Without `lan_domain` the LAN is plain `ws://`, which an https page cannot open anyway.
@@ -148,6 +149,13 @@ pub fn pwa_origins(cfg: &ssc_core::config::Config) -> Vec<String> {
     });
     if let Some(h) = relay_host.filter(|h| is_name(h)) {
         push(format!("https://{h}"));
+    }
+    // Origin = scheme://host[:port] of pwa_url (validated https:// or local http:// in settings).
+    if let Some((scheme, rest)) = cfg.pwa_url.as_deref().and_then(|u| u.trim().split_once("://")) {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or_default().to_ascii_lowercase();
+        if !authority.is_empty() && !authority.contains('@') {
+            push(format!("{}://{authority}", scheme.to_ascii_lowercase()));
+        }
     }
     if let Ok(extra) = std::env::var("SSC_PWA_ORIGINS") {
         for o in extra.split(',').map(|o| o.trim().trim_end_matches('/').to_ascii_lowercase()) {

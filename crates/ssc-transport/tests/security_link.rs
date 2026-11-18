@@ -465,6 +465,15 @@ fn pwa_origins_and_origin_matching() {
     assert_eq!(pwa_origins(&cfg)[..2], ["https://example.com".to_string(), "https://*.example.com".to_string()]);
     let cfg = Config { relay_url: Some("ws://127.0.0.1:9000".into()), ..Default::default() };
     assert!(pwa_origins(&cfg).iter().all(|o| !o.contains("127.0.0.1")));
+    // CR-19: pwa_url's origin is allowed exactly (port kept), wherever it is hosted.
+    let cfg = Config { pwa_url: Some("https://Phone.Example.org:8443/app/?x#y".into()), ..Default::default() };
+    let o = pwa_origins(&cfg);
+    assert_eq!(o, ["https://phone.example.org:8443".to_string()]);
+    assert!(origin_allowed("https://phone.example.org:8443", &o));
+    assert!(!origin_allowed("https://phone.example.org", &o));
+    assert!(!origin_allowed("https://x.phone.example.org:8443", &o));
+    let cfg = Config { pwa_url: Some("https://user@evil.test/".into()), ..Default::default() };
+    assert!(pwa_origins(&cfg).is_empty());
 }
 
 // ------------------------------------------------------------------ Cloudflare client
