@@ -141,3 +141,9 @@ Format:
 - Proposed fix: at the next prompt version add `Known people and companies:\n{{known}}` before `Documents:` in cue/fact/objection (outside `<untrusted>`; notes are user-confirmed), and a rule line "Use these notes only for who someone is; never as product facts." Then `ssc-context` fills `{{known}}` instead of `{{docs}}`.
 - "Ask about past calls" (spec: session history used for "search and ask about past calls"): not built. Short design: a phone `followup` whose text is about a past call ("what did Globex ask last week?") is answered from session history: `ssc-memory` already stores summary, action items and key Q&A per session; add a `search_sessions(query, k)` (same embedder, over summary + key Q&A) and a `{{history}}` slot (or a `history.v1.md` prompt) filled with the top 2–3 sessions' summaries, used when the follow-up mentions a known contact/account or a time phrase. Needs a prompt contract + a memory API, so it waits for the lead.
 - Status: cards implemented in `{{docs}}` (W3-FIX-PIPE); slot and past-call answers pending.
+
+## CR-18 — Default answer models from live measurements
+- From: lead (live runs on the M1 Pro, 2026-11-18)
+- What: `models.groq_model` default `qwen/qwen3.8-27b` (was `openai/gpt-oss-120b`); `models.gemini_model` default `gemini-3.5-flash-lite` (was `gemini-2.5-flash-lite`).
+- Why: Groq TTFT p50/p95 ms: qwen3.8-27b 149/189 uncached, 325/2098 cached-prefix; gpt-oss-20b 454/478, 475/821; gpt-oss-120b 696/718, 698/1016. Cue rule checks (10 synthetic answers, all rules): qwen 7/10, gpt-oss-20b 6/10, gpt-oss-120b 6/10. Groq limits for this key are the same for all three (1,000 req/day, 8,000 tokens/min). `gemini-2.5-flash-lite` returns 404 on the OpenAI-compatible endpoint; `gemini-3.5-flash-lite` TTFT p50 1141 / p95 1906 ms (reasoning_effort low).
+- Status: accepted (contracts-v1.5)

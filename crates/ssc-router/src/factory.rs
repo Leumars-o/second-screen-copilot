@@ -252,8 +252,8 @@ mod tests {
         assert_eq!(
             ids,
             vec![
-                "groq/openai/gpt-oss-120b",
-                "gemini/gemini-2.5-flash-lite",
+                "groq/qwen/qwen3.8-27b",
+                "gemini/gemini-3.5-flash-lite",
                 "ollama/gemma4:e2b",
                 "anthropic/claude-opus-5-5"
             ]

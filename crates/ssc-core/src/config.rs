@@ -131,8 +131,10 @@ impl Default for Hotkeys {
 impl Default for Models {
     fn default() -> Self {
         Self {
-            groq_model: "openai/gpt-oss-120b".into(),     // verify
-            gemini_model: "gemini-2.5-flash-lite".into(), // verify
+            // CR-18, measured live 2026-11-18: fastest first token on Groq and best cue-rule pass rate.
+            groq_model: "qwen/qwen3.8-27b".into(),
+            // CR-18: gemini-2.5-flash-lite returns 404 on the OpenAI-compatible endpoint for new keys.
+            gemini_model: "gemini-3.5-flash-lite".into(),
             // CR-8: off unless the `api.strong` key exists (the factory builds no strong tier without it).
             strong_model: Some("anthropic/claude-opus-5-5".into()),
             ollama_url: "http://127.0.0.1:11434".into(),
