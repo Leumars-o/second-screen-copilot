@@ -456,6 +456,10 @@ pub fn run() {
     let hotkeys: Arc<Mutex<Vec<(Shortcut, Hotkey)>>> = Arc::default();
     let hk = hotkeys.clone();
     tauri::Builder::default()
+        // Must be the first plugin. A second launch (e.g. from a terminal while the menu-bar
+        // instance runs) would fail to bind the LAN port; instead it hands over and exits, and
+        // the running instance shows its window.
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| show_settings(app)))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
                 .with_handler(move |app, shortcut, event| {
@@ -531,12 +535,9 @@ pub fn run() {
                     }
                 });
             }
-            // First run (no config file yet) or a missing permission: open the settings window.
-            let first_run = !Config::default_path().exists();
-            let missing = permissions::checklist().iter().any(|p| p.status == permissions::Status::Missing);
-            if first_run || missing {
-                show_settings(app.handle());
-            }
+            // A launch is always by hand (no login item), and as a menu-bar-only app nothing would
+            // be visible otherwise: show the settings window. Closing it hides to the tray.
+            show_settings(app.handle());
 
             let handle = app.handle().clone();
             let _ = handle.state::<AppState>().handle.set(handle.clone());
