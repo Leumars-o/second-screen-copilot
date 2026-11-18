@@ -21,11 +21,10 @@ pub enum QrError {
 
 /// Accepts `https://…`, or `http://localhost…` / `http://127.0.0.1…` for development; no fragment.
 pub fn check_pwa_url(url: &str) -> Result<(), QrError> {
-    let ok = (url.starts_with("https://")
-        || url.starts_with("http://localhost")
-        || url.starts_with("http://127.0.0.1"))
-        && !url.contains('#')
-        && !url.contains(char::is_whitespace);
+    let ok =
+        (url.starts_with("https://") || url.starts_with("http://localhost") || url.starts_with("http://127.0.0.1"))
+            && !url.contains('#')
+            && !url.contains(char::is_whitespace);
     if ok { Ok(()) } else { Err(QrError::PwaUrl(url.to_string())) }
 }
 

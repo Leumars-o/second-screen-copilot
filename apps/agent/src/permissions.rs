@@ -92,9 +92,7 @@ mod ffi {
         let Some(cls) = capture_device() else { return };
         let done = block2::RcBlock::new(|_granted: Bool| {});
         // SAFETY: documented class method; the block is copied by AVFoundation.
-        let _: () = unsafe {
-            msg_send![cls, requestAccessForMediaType: AVMediaTypeAudio, completionHandler: &*done]
-        };
+        let _: () = unsafe { msg_send![cls, requestAccessForMediaType: AVMediaTypeAudio, completionHandler: &*done] };
     }
 }
 
