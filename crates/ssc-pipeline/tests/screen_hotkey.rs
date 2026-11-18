@@ -58,7 +58,8 @@ impl ScreenSource for WordWindow {
     }
 }
 
-const SCREEN_ANSWER: &str = "Running a trained model on new data to get predictions\n---\n1: Training learns the weights; inference uses them.\n";
+const SCREEN_ANSWER: &str =
+    "Running a trained model on new data to get predictions\n---\nTraining learns the weights; inference uses them.\n";
 
 struct Rig {
     pipeline: Pipeline,
@@ -133,7 +134,7 @@ async fn cloud_screen_hotkey_sends_the_image_and_window_text_and_streams_a_scree
             .collect()
     };
     assert_eq!(text(Block::Cue).trim(), "Running a trained model on new data to get predictions");
-    assert!(text(Block::Detail).contains("1: Training learns the weights"));
+    assert!(text(Block::Detail).contains("Training learns the weights"));
 
     {
         let prompts = r.model.prompts.lock().unwrap();
@@ -142,7 +143,7 @@ async fn cloud_screen_hotkey_sends_the_image_and_window_text_and_streams_a_scree
         assert_eq!(p.images[0].data, JPEG);
         assert!(p.dynamic.contains(QUESTION), "window text reaches the model:\n{}", p.dynamic);
         assert!(p.dynamic.contains("Microsoft Word — Quiz.docx"));
-        assert!(p.prefix.contains("pressed the screen hotkey"), "screen.v2 prompt");
+        assert!(p.prefix.contains("pressed the screen hotkey"), "screen.v3 prompt");
     }
     assert_eq!(*r.screen.grabs.lock().unwrap(), vec![true]);
 
@@ -198,4 +199,17 @@ async fn screen_watch_gates_continuous_screen_reading() {
     r.pipeline.start_session(None).await.unwrap();
     tokio::time::sleep(Duration::from_secs(3)).await;
     assert!(r.screen.snapshots.load(Ordering::SeqCst) >= 2, "on: polled");
+}
+
+/// CR-21: the phone's "Read screen" button is the screen hotkey.
+#[tokio::test(start_paused = true)]
+async fn phone_screen_command_reads_the_screen_and_answers() {
+    let mut r = rig(Mode::Cloud, false, &[SCREEN_ANSWER]);
+    r.phone.send(None, Command::Screen).await;
+    let env = r.phone.wait_for("answer.start", |m| matches!(m, Message::AnswerStart(_))).await;
+    let Message::AnswerStart(s) = env.message else { unreachable!() };
+    assert_eq!((s.format, s.trigger), (AnswerFormat::Screen, Trigger::Hotkey));
+    assert_eq!(wait_end(&mut r).await.reason, AnswerEndReason::Done);
+    assert_eq!(*r.screen.grabs.lock().unwrap(), vec![true]);
+    assert_eq!(r.model.prompts.lock().unwrap()[0].images.len(), 1);
 }

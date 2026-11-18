@@ -277,6 +277,9 @@ pub enum Command {
     Number { answer_id: Uuid },
     #[serde(rename = "expand_all")]
     ExpandAll { answer_id: Uuid },
+    /// CR-21: the screen hotkey, from the phone.
+    #[serde(rename = "screen")]
+    Screen,
     #[serde(rename = "followup")]
     Followup {
         #[serde(default, skip_serializing_if = "Option::is_none")]

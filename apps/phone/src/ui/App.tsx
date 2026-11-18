@@ -96,6 +96,8 @@ export function App() {
   const [paired, setPaired] = useState(false);
   const [pairError, setPairError] = useState<string | null>(null);
   const [attempts, setAttempts] = useState<LinkAttempt[]>([]);
+  /** "Read screen" pressed: the id of the answer on top at that moment (until a new one lands). */
+  const [reading, setReading] = useState<string | null | undefined>(undefined);
   const [screen, setScreen] = useState<Screen>("live");
   const [openAnswer, setOpenAnswer] = useState<string | null>(null);
 
@@ -196,6 +198,13 @@ export function App() {
 
   const online = status?.state === "connected" && paired;
   const [current, ...older] = state.answers;
+  const waitingForScreen = reading !== undefined && (current?.id ?? null) === reading;
+  const readScreen = () => {
+    setReading(current?.id ?? null);
+    void copilot.readScreen();
+    // A capture that produces nothing (no permission, PC asleep) must not leave the button stuck.
+    setTimeout(() => setReading(undefined), 15_000);
+  };
   const pinned = older.filter((a) => a.pinned);
   const pendingContacts = state.summaries.flatMap((s) => s.contact_suggestions).filter((c) => state.confirmedContacts[c.id] === undefined).length;
   const lastThem = [...state.transcript].reverse().find((t) => t.speaker === "them");
@@ -207,6 +216,15 @@ export function App() {
       {screen === "live" && (
         <section className="screen live" data-testid="live-screen">
           {state.session && <p className="session muted small">{state.session.mode === "local" ? "Local mode" : "Cloud mode"} · {state.session.profile_id}</p>}
+          <button
+            type="button"
+            className="primary read-screen"
+            disabled={!online || waitingForScreen}
+            onClick={readScreen}
+            data-testid="read-screen"
+          >
+            {waitingForScreen ? "Reading the screen…" : "Read PC screen"}
+          </button>
           {lastThem && (
             <p className="them" data-testid="transcript">
               {lastThem.text}

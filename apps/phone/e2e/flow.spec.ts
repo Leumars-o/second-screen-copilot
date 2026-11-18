@@ -265,3 +265,17 @@ test("CR-20: a screen answer shows the answer and its working as free text", asy
   await expect(card.getByTestId("act-expand-all")).toHaveCount(0); // nothing to expand
   await expect(card.getByTestId("act-regenerate").or(card.getByText("Again"))).toBeVisible();
 });
+
+test("CR-21: 'Read PC screen' sends the screen command and waits for the answer", async ({ request }) => {
+  const btn = page.getByTestId("read-screen");
+  await expect(btn).toBeEnabled();
+  await btn.click();
+  await expect(btn).toHaveText("Reading the screen…");
+  await expect(btn).toBeDisabled();
+  await expect.poll(async () => (await mock.commands(request)).filter((c) => c.action === "screen")).toEqual([{ action: "screen" }]);
+  // The PC answers: a new card lands and the button is ready again.
+  await mock.post(request, "answer", { format: "screen", trigger: "hotkey", deltas: [{ block: "cue", text: "Nairobi.\n" }], end: { cues: [] } });
+  await expect(page.getByTestId("answer-current").getByTestId("stream-cue")).toHaveText("Nairobi.\n");
+  await expect(btn).toHaveText("Read PC screen");
+  await expect(btn).toBeEnabled();
+});

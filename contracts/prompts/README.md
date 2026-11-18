@@ -20,7 +20,7 @@ SOURCE: <doc name>           ← required when FACT is present
 NOT_IN_DOCS                  ← alone, when a product-specific question isn't covered
 ```
 
-Screen answers (`screen.v2.md`, CR-20) use the same `---` split: the text before it is the answer (block "cue", free text, not numbered cues) and the `N:` lines after it are the working (block "detail"). The phone shows them as a "screen" card.
+Screen answers (`screen.v3.md`, CR-20) use the same `---` split: the text before it is the answer (block "cue", free text, not numbered cues) and the optional one or two plain sentences after it are context (block "detail"; no numbered points since v3, CR-21). The phone shows them as a "screen" card.
 
 Parser rules: lines matching `^\d+\. ` before `---` are cues (truncate to 6 words, keep max 7); `^\d+: ` after `---` maps to that cue's `expand`; `FACT:` / `SOURCE:` / `NOT_IN_DOCS` may appear anywhere; anything else is dropped. Fact answers may have zero cues.
 
@@ -30,6 +30,6 @@ Parser rules: lines matching `^\d+\. ` before `---` are cues (truncate to 6 word
 | `fact.v1.md` | Pricing / limits / dates | fast |
 | `objection.v1.md` | Objections and pushback | fast |
 | `expand.v1.md` | "Expand all" and the strong-tier detail | strong (or fast) |
-| `screen.v2.md` | Screen hotkey (CR-20): answer what is on screen; image attached in cloud mode | fast (vision) |
+| `screen.v3.md` | Screen hotkey (CR-20): answer what is on screen; image attached in cloud mode | fast (vision) |
 | `summary.v1.md` | Session summary + action items + contact suggestions (JSON out) | post-call |
 | `followup.v1.md` | Follow-up email draft | post-call |

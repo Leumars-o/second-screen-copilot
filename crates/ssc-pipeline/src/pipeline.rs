@@ -1355,6 +1355,11 @@ fn answer_cancel(inner: &Inner) -> CancellationToken {
 async fn handle_command(inner: Arc<Inner>, c: Command) {
     let mem = inner.parts.memory.clone();
     let job = match c {
+        Command::Screen => {
+            // CR-21: same path as the screen hotkey.
+            let _ = Pipeline { inner: inner.clone() }.answer_from_screen();
+            None
+        }
         Command::Pin { answer_id } => {
             if let Err(e) = blocking(move || mem.pin_answer(answer_id, true)).await {
                 log(format!("pin {answer_id}: {e}"));

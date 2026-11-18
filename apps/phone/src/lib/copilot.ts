@@ -186,6 +186,11 @@ export class Copilot {
     void this.command({ action, answer_id: id });
   }
 
+  /** CR-21: ask the PC to read its focused window and answer it (the screen hotkey). */
+  readScreen(): Promise<boolean> {
+    return this.command({ action: "screen" });
+  }
+
   expandAll(id: string): void {
     this.updateAnswer(id, (x) => ({ ...x, expandAll: true }));
     void this.command({ action: "expand_all", answer_id: id });

@@ -114,6 +114,9 @@ export type Command =
       answer_id: string;
     }
   | {
+      action: "screen";
+    }
+  | {
       action: "followup";
       answer_id?: string;
       text: string;

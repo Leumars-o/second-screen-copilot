@@ -1,4 +1,4 @@
-//! CR-20 eval: the screen prompt (`screen.v2.md`) + a screenshot → each vision model.
+//! CR-20 eval: the screen prompt (`screen.v3.md`) + a screenshot → each vision model.
 //! Eight synthetic screens with one known answer each (`fixtures/screens`, regenerate with
 //! `gen.swift`). Graded deterministically on the answer line (text before `---`).
 //! Live (real network, keychain keys), never run by the gate:
@@ -60,7 +60,7 @@ const META: &[&str] = &[
 ];
 
 fn prompt(label: &str, window: &str, jpeg: Vec<u8>) -> Prompt {
-    let t = include_str!("../../../contracts/prompts/screen.v2.md");
+    let t = include_str!("../../../contracts/prompts/screen.v3.md");
     let (prefix, dynamic) = t.split_once("<<<DYNAMIC>>>").unwrap();
     Prompt {
         prefix: prefix
@@ -120,7 +120,20 @@ async fn run(m: &dyn AnswerModel, pause: std::time::Duration) -> usize {
                 // "No question found" must say what is on screen: describing it is the answer.
                 let meta = if *name == "no_question" { None } else { META.iter().find(|m| lower.contains(*m)) };
                 let echoed = name.ends_with("_inference") && line.to_lowercase().contains("what is inference");
-                let pass = passes(&line, expect) && meta.is_none() && !echoed;
+                // v3 (CR-21): no numbered points or bullets after the answer.
+                let after = text.split_once("\n---").map_or("", |(_, d)| d);
+                let listy = after.lines().map(str::trim).any(|l| {
+                    l.starts_with("- ")
+                        || l.starts_with("* ")
+                        || l.starts_with("• ")
+                        || l.split_once([':', '.', ')']).is_some_and(|(n, _)| {
+                            !n.is_empty() && n.len() <= 2 && n.chars().all(|c| c.is_ascii_digit())
+                        })
+                });
+                let pass = passes(&line, expect) && meta.is_none() && !echoed && !listy;
+                if listy {
+                    println!("     numbered/bulleted lines: {}", text.replace('\n', " | "));
+                }
                 if let Some(m) = meta {
                     println!("     meta talk ({m:?}): {}", text.replace('\n', " | "));
                 }

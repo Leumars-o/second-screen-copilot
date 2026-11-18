@@ -173,3 +173,12 @@ Format:
 - Eval (`screen_eval.rs`), now with a realistic About Me, profile and docs, a WPS-like window with toolbar text in the window-text slot, and graders for meta talk and an echoed question: Groq Qwen 9/9; Gemini 8/9 before the product-rule fix (its miss was an invented pricing hedge; the rule now says "never guess"). The live cue check on Qwen numbers its support lines correctly.
 - Also: `SSC_DEBUG_ANSWERS=1` prints each answer's prompt text, model and raw output to the agent terminal (never to disk; the security test forbids storing screen content). The phone hides "Expand all" on screen cards.
 - Status: accepted (contracts-v1.8).
+
+## CR-21 — "Read PC screen" from the phone; screen answers without numbered points
+- From: lead (2026-11-18, screen hotkey confirmed working): the numbered working lines under a screen answer were sometimes padding ("bogus"); and the screen read should be triggerable from the phone.
+- What:
+  - Protocol: command `{"action": "screen"}` (no answer id) → `Pipeline::answer_from_screen`, exactly the ⌥⇧S path. Fixtures `command.screen.json` (valid) and `command.screen.extra_field.json` (invalid).
+  - Phone: a full-width "Read PC screen" button at the top of the Live screen, enabled while connected; it shows "Reading the screen…" until the new card lands (15 s cap).
+  - `screen.v3.md` (was v2): after the answer, at most one or two plain sentences (max 40 words) of context, only when they genuinely help. No numbered points, bullets or lists, and never pad.
+- Eval: Qwen 9/9 on v3; the grader now also fails numbered or bulleted lines after `---`.
+- Status: accepted (contracts-v1.9).
