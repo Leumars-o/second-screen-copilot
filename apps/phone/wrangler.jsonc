@@ -5,6 +5,7 @@
 {
   "name": "ssc-phone",
   "compatibility_date": "2026-11-01",
-  "assets": { "directory": "./out", "not_found_handling": "404-page" },
+  "main": "./worker.js",
+  "assets": { "directory": "./out", "binding": "ASSETS", "not_found_handling": "404-page", "run_worker_first": true },
   "routes": [{ "pattern": "app.live-preview.space", "custom_domain": true }]
 }

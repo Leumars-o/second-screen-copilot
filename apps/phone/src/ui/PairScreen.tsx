@@ -17,6 +17,16 @@ export function PairScreen({ onPair, error }: { onPair: (qrText: string, deviceN
     let stop: (() => void) | undefined;
     let cancelled = false;
     (async () => {
+      // Safari/Chrome hide the camera (navigator.mediaDevices) on plain http://.
+      if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+        setCamError(
+          window.isSecureContext
+            ? "This browser has no camera access. Scan the QR with the phone's camera app, or paste the code."
+            : `The camera needs a secure page. Open https://${location.host} (or scan the QR with the phone's camera app).`,
+        );
+        setScanning(false);
+        return;
+      }
       try {
         const { BrowserQRCodeReader } = await import("@zxing/browser");
         const reader = new BrowserQRCodeReader();
