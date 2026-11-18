@@ -212,3 +212,19 @@ test("CR-15: strict CSP present and no violation during the whole flow", async (
   });
   await expect.poll(() => cspViolations.some((v) => v.startsWith("img-src"))).toBe(true);
 });
+
+// Last: it replaces the pairing the earlier tests use.
+test("CR-19: opening a pairing link (camera scan) pairs in one step", async ({ request }) => {
+  const qr = await (await request.post("/__mock/qr")).json(); // a fresh, unused code
+  const b64url = Buffer.from(JSON.stringify(qr)).toString("base64url");
+  const before = (await mock.received(request)).filter((e) => e.type === "pair.hello").length;
+  const dialogs: string[] = [];
+  page.once("dialog", (d) => (dialogs.push(d.message()), void d.accept())); // already paired: asks first
+  await page.goto("about:blank"); // a camera scan is a fresh page load, not a hash change
+  await page.goto(`/#pair=${b64url}`);
+  await expect(page.getByTestId("status")).toHaveText(/Connected · Wi-Fi/);
+  expect(new URL(page.url()).hash).toBe("");
+  const hellos = (await mock.received(request)).filter((e) => e.type === "pair.hello");
+  expect(hellos.length).toBe(before + 1);
+  expect(dialogs).toEqual(["Pair with this PC? It replaces your current pairing."]);
+});

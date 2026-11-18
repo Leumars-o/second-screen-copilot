@@ -134,7 +134,7 @@ Deliverables: one JSON Schema per type in `contracts/protocol/`, at least one va
 
 ### 4.3 Crypto and pairing
 
-- QR payload: `{ "v":1, "urls":["ws://<lan-ip>:<port>", "wss://<relay>/r/<room>"], "pc_pub":"b64", "token":"b64(32B)", "exp": <unix s, now+120> }`.
+- QR payload: `{ "v":1, "urls":["ws://<lan-ip>:<port>", "wss://<relay>/r/<room>"], "pc_pub":"b64", "token":"b64(32B)", "exp": <unix s, now+120> }`. With `pwa_url` set, the QR text is `<pwa_url>#pair=<base64url(that JSON)>` (CR-19).
 - Phone makes an X25519 keypair and sends `pair.hello` **in plaintext, once**. The PC checks `proof` and `exp`, then burns the token.
 - Shared secret = X25519(own_priv, peer_pub). Keys = HKDF-SHA256(ikm = shared, salt = token, info = `"ssc/v1/pc->phone"` and `"ssc/v1/phone->pc"`), 32 bytes each.
 - Frame on the wire: `0x01 | nonce(24 random bytes) | XChaCha20-Poly1305(key, nonce, plaintext = envelope JSON, aad = UTF-8 session_id (or "") ‖ seq as u64 BE)`.

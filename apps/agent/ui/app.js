@@ -80,7 +80,7 @@ function lanTlsText(/** @type {any} */ t) {
 function renderSettings() {
   const f = form("#settings");
   const c = state.config;
-  for (const k of ["mode", "redaction", "redact_emails", "keep_transcripts", "relay_url", "lan_domain", "lan_port", "testing"]) {
+  for (const k of ["mode", "redaction", "redact_emails", "keep_transcripts", "relay_url", "lan_domain", "pwa_url", "lan_port", "testing"]) {
     setField(f, k, c[k]);
   }
   for (const k of ["gemini_tier", "strong_model", "strong_base_url", "decision_cloud_base_url"]) setField(f, k, c.models[k]);
@@ -265,7 +265,7 @@ form("#settings").onsubmit = async (e) => {
   const f = form("#settings");
   const c = structuredClone(state.config);
   for (const k of ["mode", "redaction", "redact_emails", "keep_transcripts", "testing"]) c[k] = getField(f, k);
-  for (const k of ["relay_url", "lan_domain"]) c[k] = getField(f, k) || null;
+  for (const k of ["relay_url", "lan_domain", "pwa_url"]) c[k] = getField(f, k) || null;
   c.lan_port = Number(getField(f, "lan_port"));
   c.models.gemini_tier = getField(f, "gemini_tier");
   c.models.strong_model = getField(f, "strong_model") || null;

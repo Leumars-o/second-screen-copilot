@@ -2,7 +2,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import type { LinkStatus } from "@ssc/protocol";
 import { Copilot } from "../lib/copilot";
-import { connect, forgetPairing, loadPairing, pairFromQr, type LinkHandle, type StoredPairing } from "../lib/connection";
+import { connect, defaultDeviceName, forgetPairing, loadPairing, pairFromQr, takePairFromLocation, type LinkHandle, type StoredPairing } from "../lib/connection";
 import { browserVibrate } from "../lib/vibrate";
 import { AnswerCard } from "./AnswerCard";
 import { FollowUp } from "./FollowUp";
@@ -56,8 +56,22 @@ export function App() {
 
   useEffect(() => {
     let live = true;
-    void loadPairing().then((s) => {
+    // CR-19: opened from the camera by a pairing link. A link can come from anywhere (a message,
+    // a web page), so replacing an existing pairing needs the user's yes.
+    const link = takePairFromLocation();
+    void loadPairing().then(async (s) => {
       if (!live) return;
+      if (link && (!s || window.confirm("Pair with this PC? It replaces your current pairing."))) {
+        try {
+          const fresh = await pairFromQr(link, defaultDeviceName());
+          if (!live) return;
+          setStored(fresh);
+          setPaired(false);
+          return;
+        } catch (e) {
+          setPairError((e as Error).message);
+        }
+      }
       setStored(s);
       setPaired(!!s?.confirmed);
     });

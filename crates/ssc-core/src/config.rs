@@ -35,6 +35,10 @@ pub struct Config {
     pub lan_domain: Option<String>,
     /// CR-9: Cloudflare zone id of `lan_domain`'s zone, for tokens without Zone:Read. None = look it up.
     pub lan_zone_id: Option<String>,
+    /// CR-19: where the phone app is hosted, e.g. "https://app.example.com/". When set, the QR is
+    /// a link to it with the pairing payload in the fragment, so the phone's camera opens and pairs
+    /// in one step. None = the QR holds the raw JSON (scan it from inside the app).
+    pub pwa_url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,6 +118,7 @@ impl Default for Config {
             redact_emails: false,
             lan_domain: None,
             lan_zone_id: None,
+            pwa_url: None,
         }
     }
 }

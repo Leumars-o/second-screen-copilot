@@ -74,8 +74,32 @@ export async function forgetPairing(): Promise<void> {
 }
 
 /** Validate the QR text, derive keys, store the pending pairing (hello not yet sent). */
+/** CR-19: a QR may be a link to this app, `<url>#pair=<base64url(JSON)>`; returns the JSON text.
+ * Anything else is returned unchanged (the raw-JSON form). */
+export function qrJsonFromText(text: string): string {
+  const t = text.trim();
+  const i = t.indexOf("#pair=");
+  if (i < 0 || !/^https?:\/\//.test(t)) return t;
+  const b64 = t.slice(i + "#pair=".length).replace(/-/g, "+").replace(/_/g, "/");
+  try {
+    const bin = atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4));
+    return new TextDecoder().decode(Uint8Array.from(bin, (c) => c.charCodeAt(0)));
+  } catch {
+    throw new Error("This pairing link is damaged. Show a new QR code on the PC.");
+  }
+}
+
+/** The `#pair=` payload of a link that opened the app, if any; strips it from the address bar
+ * (and so from history) either way. */
+export function takePairFromLocation(): string | null {
+  if (typeof location === "undefined" || !location.hash.startsWith("#pair=")) return null;
+  const href = location.href;
+  history.replaceState(null, "", location.pathname + location.search);
+  return href;
+}
+
 export async function pairFromQr(qrText: string, deviceName: string): Promise<StoredPairing> {
-  const qr = parseQr(qrText);
+  const qr = parseQr(qrJsonFromText(qrText));
   const start = await startPairing(qr, deviceName);
   const stored: StoredPairing = { pairing: start.pairing, hello: start.hello, confirmed: false };
   localStorage.removeItem(LINK_KEY); // fresh keys -> fresh seq space

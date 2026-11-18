@@ -147,3 +147,9 @@ Format:
 - What: `models.groq_model` default `qwen/qwen3.8-27b` (was `openai/gpt-oss-120b`); `models.gemini_model` default `gemini-3.5-flash-lite` (was `gemini-2.5-flash-lite`).
 - Why: Groq TTFT p50/p95 ms: qwen3.8-27b 149/189 uncached, 325/2098 cached-prefix; gpt-oss-20b 454/478, 475/821; gpt-oss-120b 696/718, 698/1016. Cue rule checks (10 synthetic answers, all rules): qwen 7/10, gpt-oss-20b 6/10, gpt-oss-120b 6/10. Groq limits for this key are the same for all three (1,000 req/day, 8,000 tokens/min). `gemini-2.5-flash-lite` returns 404 on the OpenAI-compatible endpoint; `gemini-3.5-flash-lite` TTFT p50 1141 / p95 1906 ms (reasoning_effort low).
 - Status: accepted (contracts-v1.5)
+
+## CR-19 — QR as a link to the phone app (camera scan pairs in one step)
+- From: lead (first real-phone pairing, 2026-11-18): the iPhone camera showed the raw JSON QR as text and offered to call the `exp` number.
+- What: new `Config::pwa_url: Option<String>` (`https://…`, or `http://localhost` / `127.0.0.1` for development; no `#`). When set, the QR text is `<pwa_url>#pair=<base64url(JSON), no padding>`; the JSON is unchanged and still validated against `qr.schema.json`. When unset, the QR is the raw JSON as before. The phone accepts both forms from the in-app scanner and the paste box, and on load takes `#pair=` from the address bar (stripping it from history) and pairs, replacing any stored pairing.
+- Why: the fragment is never sent to the server, so the token and `pc_pub` stay between the two devices, as with the raw form. A QR is a one-time, 120 s code either way.
+- Status: accepted (contracts-v1.6). Implemented: `ssc_crypto::qr::{qr_text, check_pwa_url}`, `apps/phone/src/lib/connection.ts` (`qrJsonFromText`, `takePairFromLocation`), e2e "CR-19".

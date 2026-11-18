@@ -339,7 +339,8 @@ async fn begin_pairing(st: State<'_, AppState>) -> Res<String> {
     // The QR carries the LAN URL: wait for LAN TLS to settle so it is wss:// when available.
     ssc_pipeline::transport::wait_lan_tls_settled(&s.lan_tls, std::time::Duration::from_secs(90)).await;
     let qr = s.transport.begin_pairing().await.map_err(err)?;
-    ssc_crypto::qr::svg(&qr).map_err(err)
+    let pwa_url = st.cfg.lock().expect("lock").pwa_url.clone();
+    ssc_crypto::qr::svg(&qr, pwa_url.as_deref()).map_err(err)
 }
 
 #[tauri::command]

@@ -42,6 +42,7 @@ pub fn sanitize(mut c: Config) -> Result<Config, String> {
     let trim_opt = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
     c.relay_url = trim_opt(c.relay_url);
     c.lan_domain = trim_opt(c.lan_domain).map(|d| d.to_lowercase());
+    c.pwa_url = trim_opt(c.pwa_url);
     c.models.strong_model = trim_opt(c.models.strong_model);
     c.models.strong_base_url = trim_opt(c.models.strong_base_url);
     if let Some(r) = &c.relay_url
@@ -58,6 +59,11 @@ pub fn sanitize(mut c: Config) -> Result<Config, String> {
         && !(u.starts_with("https://") || u.starts_with("http://"))
     {
         return Err("Strong model base URL must start with https://.".into());
+    }
+    if let Some(u) = &c.pwa_url
+        && let Err(e) = ssc_crypto::qr::check_pwa_url(u)
+    {
+        return Err(e.to_string());
     }
     if c.lan_port == 0 {
         return Err("LAN port must be 1-65535.".into());
