@@ -52,15 +52,20 @@ impl AxEl {
     }
 
     fn attr(&self, name: &str) -> Option<CFType> {
+        self.attr_err(name).ok()
+    }
+
+    /// Like [`Self::attr`], keeping the AXError code for diagnostics.
+    fn attr_err(&self, name: &str) -> std::result::Result<CFType, i32> {
         let name = CFString::new(name);
         let mut v: CFTypeRef = std::ptr::null();
         // SAFETY: valid element and attribute; `v` receives a +1 reference on success.
         let err = unsafe { AXUIElementCopyAttributeValue(self.0, name.as_concrete_TypeRef(), &mut v) };
         if err != kAXErrorSuccess || v.is_null() {
-            return None;
+            return Err(err);
         }
         // SAFETY: Copy rule, +1.
-        Some(unsafe { CFType::wrap_under_create_rule(v) })
+        Ok(unsafe { CFType::wrap_under_create_rule(v) })
     }
 
     /// Several attributes in one IPC round trip. Missing ones come back as `None`.
@@ -200,6 +205,76 @@ impl AxReader {
     }
 }
 
+/// Floor for the per-message Accessibility timeout, seconds.
+const MIN_AX_MESSAGE_TIMEOUT_S: f32 = 0.25;
+
+/// Human name of an AXError code, for logs.
+fn ax_error_name(code: i32) -> String {
+    let name = match code {
+        -25200 => "failure",
+        -25201 => "illegal argument",
+        -25202 => "invalid element",
+        -25204 => "cannot complete: the app did not answer in time",
+        -25205 => "attribute unsupported",
+        -25211 => "API disabled: Accessibility permission",
+        -25212 => "no value",
+        _ => "error",
+    };
+    format!("AXError {code}: {name}")
+}
+
+/// The frontmost normal window from the window server (no Accessibility needed): app name,
+/// window title (empty without Screen Recording) and bounds in global points. Our own windows
+/// are skipped. Front-to-back order, first layer-0 window big enough to be a real window.
+pub fn front_window() -> Option<(String, String, Rect)> {
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::number::CFNumber;
+    #[link(name = "CoreGraphics", kind = "framework")]
+    unsafe extern "C" {
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> CFArrayRef;
+    }
+    const ON_SCREEN_ONLY: u32 = 1;
+    const EXCLUDE_DESKTOP: u32 = 16;
+    // SAFETY: plain call; returns a +1 CFArray of CFDictionary (or null).
+    let raw = unsafe { CGWindowListCopyWindowInfo(ON_SCREEN_ONLY | EXCLUDE_DESKTOP, 0) };
+    if raw.is_null() {
+        return None;
+    }
+    // SAFETY: Copy rule, +1; elements are CFDictionaryRef.
+    let list: CFArray<CFDictionary<CFString, CFType>> = unsafe { CFArray::wrap_under_create_rule(raw) };
+    let me = std::process::id() as i64;
+    let num = |d: &CFDictionary<CFString, CFType>, k: &str| -> Option<f64> {
+        d.find(CFString::new(k)).and_then(|v| v.downcast::<CFNumber>()).and_then(|n| n.to_f64())
+    };
+    let text = |d: &CFDictionary<CFString, CFType>, k: &str| -> String {
+        d.find(CFString::new(k)).and_then(|v| v.downcast::<CFString>()).map(|s| s.to_string()).unwrap_or_default()
+    };
+    for w in list.iter() {
+        if num(&w, "kCGWindowLayer") != Some(0.0) || num(&w, "kCGWindowOwnerPID").map(|p| p as i64) == Some(me) {
+            continue;
+        }
+        if num(&w, "kCGWindowAlpha").is_some_and(|a| a <= 0.0) {
+            continue;
+        }
+        let Some(b) = w.find(CFString::new("kCGWindowBounds")).and_then(|v| v.downcast::<CFDictionary>()) else {
+            continue;
+        };
+        // SAFETY: the bounds dictionary maps CFString keys to CFNumber values.
+        let b: CFDictionary<CFString, CFType> = unsafe { CFDictionary::wrap_under_get_rule(b.as_concrete_TypeRef()) };
+        let (Some(x), Some(y), Some(width), Some(height)) =
+            (num(&b, "X"), num(&b, "Y"), num(&b, "Width"), num(&b, "Height"))
+        else {
+            continue;
+        };
+        if width < 100.0 || height < 60.0 {
+            continue;
+        }
+        let rect = Rect { x: x as i32, y: y as i32, w: width.ceil() as i32, h: height.ceil() as i32 };
+        return Some((text(&w, "kCGWindowOwnerName"), text(&w, "kCGWindowName"), rect));
+    }
+    None
+}
+
 impl Default for AxReader {
     fn default() -> Self {
         Self::new()
@@ -207,6 +282,10 @@ impl Default for AxReader {
 }
 
 impl AxBackend for AxReader {
+    fn front_window(&self) -> Option<(String, String, Rect)> {
+        front_window()
+    }
+
     fn read_focused(&self, limits: &WalkLimits) -> Result<WindowRead> {
         if !Self::is_trusted() {
             return Err(SscError::Unavailable("macOS Accessibility permission not granted".into()));
@@ -215,11 +294,18 @@ impl AxBackend for AxReader {
         let sys = AxEl::from_create(unsafe { AXUIElementCreateSystemWide() })
             .ok_or_else(|| SscError::Unavailable("AXUIElementCreateSystemWide failed".into()))?;
         // A hung app must not stall the walk: cap every AX message (global when set on system-wide).
+        // Not below 250 ms: the walk enforces its own budget between nodes, and a busy app (a
+        // large document) can take longer than a 50 ms walk budget just to name the focused app.
         // SAFETY: valid element.
-        unsafe { AXUIElementSetMessagingTimeout(sys.0, limits.budget.as_secs_f32().max(0.02)) };
-        let app = sys
-            .element(kAXFocusedApplicationAttribute)
-            .ok_or_else(|| SscError::Unavailable("no focused application".into()))?;
+        unsafe { AXUIElementSetMessagingTimeout(sys.0, limits.budget.as_secs_f32().max(MIN_AX_MESSAGE_TIMEOUT_S)) };
+        let app = match sys.attr_err(kAXFocusedApplicationAttribute) {
+            // SAFETY: plain type-id query.
+            Ok(v) if v.type_of() == unsafe { AXUIElementGetTypeID() } => AxEl::from_get(v.as_CFTypeRef()),
+            Ok(_) => return Err(SscError::Unavailable("no focused application (unexpected type)".into())),
+            Err(code) => {
+                return Err(SscError::Unavailable(format!("no focused application ({})", ax_error_name(code))));
+            }
+        };
         if let Some(pid) = app.pid() {
             let mut seen = self.enabled_pids.lock().unwrap_or_else(|e| e.into_inner());
             if seen.insert(pid) {

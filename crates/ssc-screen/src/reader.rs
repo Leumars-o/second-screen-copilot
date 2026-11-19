@@ -24,7 +24,37 @@ pub struct WindowRead {
 /// Platform accessibility backend (UI Automation, AXUIElement, or a fake in tests).
 pub trait AxBackend: Send + Sync {
     fn read_focused(&self, limits: &WalkLimits) -> Result<WindowRead>;
+    /// The frontmost window without Accessibility (app, title, bounds), for the screen hotkey
+    /// when the Accessibility read fails (CR-22). Default: unknown.
+    fn front_window(&self) -> Option<(String, String, Rect)> {
+        None
+    }
 }
+
+/// Apps that can hold keyboard focus but are never what the user wants answered: system alerts
+/// and overlays, and the agent itself (its settings window). The screen hotkey uses the window
+/// server's front window instead (CR-22).
+pub const NOT_A_GRAB_TARGET: &[&str] = &[
+    "UserNotificationCenter",
+    "NotificationCenter",
+    "Notification Center",
+    "Control Center",
+    "ControlCenter",
+    "Spotlight",
+    "Dock",
+    "SystemUIServer",
+    "loginwindow",
+    "Window Server",
+    "ssc-agent",
+    "Second Screen Copilot",
+];
+
+fn is_grab_target(app: &str) -> bool {
+    !NOT_A_GRAB_TARGET.iter().any(|n| n.eq_ignore_ascii_case(app.trim()))
+}
+
+/// The screen hotkey is user-initiated: a longer walk budget than the 1 s poll loop's 50 ms.
+pub const GRAB_WALK_BUDGET: std::time::Duration = std::time::Duration::from_millis(1000);
 
 struct Ocr {
     frames: Box<dyn FrameSource>,
@@ -93,7 +123,42 @@ impl ScreenReader {
     /// model reads the image). Without `image`, or if the capture fails, the text with the
     /// usual OCR fallback.
     pub fn grab_window(&self, image: bool) -> Result<crate::grab::ScreenGrab> {
-        let read = self.ax.read_focused(&self.limits)?;
+        let limits = WalkLimits { budget: self.limits.budget.max(GRAB_WALK_BUDGET), ..self.limits };
+        // CR-22: if Accessibility can't name the focused window, the window server still knows
+        // the frontmost one; the image (and OCR) need only its bounds.
+        let read = match self.ax.read_focused(&limits) {
+            Ok(r) if r.bounds.is_some_and(|b| b.w > 0 && b.h > 0) && is_grab_target(&r.app) => r,
+            // A system alert or our own window has focus: answer the real front window.
+            Ok(r) if !is_grab_target(&r.app) => match self.ax.front_window() {
+                Some((app, title, b)) => WindowRead { app, window_title: title, bounds: Some(b), ..Default::default() },
+                None => r,
+            },
+            res => {
+                let ax_error = res.as_ref().err().map(ToString::to_string);
+                match self.ax.front_window() {
+                    Some((app, title, b)) => {
+                        let mut r = res.unwrap_or_default();
+                        if r.app.is_empty() {
+                            r.app = app;
+                        }
+                        if r.window_title.is_empty() {
+                            r.window_title = title;
+                        }
+                        r.bounds = Some(b);
+                        r
+                    }
+                    None => match res {
+                        Ok(r) => r,
+                        Err(e) => {
+                            return Err(ssc_core::SscError::Unavailable(format!(
+                                "{} (and no front window from the window server)",
+                                ax_error.unwrap_or_else(|| e.to_string())
+                            )));
+                        }
+                    },
+                }
+            }
+        };
         let bounds = read.bounds.filter(|b| b.w > 0 && b.h > 0);
         let mut capture_error = None;
         if image {

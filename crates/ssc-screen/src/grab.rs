@@ -102,6 +102,85 @@ mod tests {
     }
     const WIN: Option<Rect> = Some(Rect { x: 10, y: 20, w: 800, h: 600 });
 
+    /// Accessibility fails ("no focused application"), the window server still has the window.
+    struct NoAx(Option<(String, String, Rect)>);
+    impl AxBackend for NoAx {
+        fn read_focused(&self, _: &WalkLimits) -> Result<WindowRead> {
+            Err(SscError::Unavailable("no focused application (AXError -25204: cannot complete)".into()))
+        }
+        fn front_window(&self) -> Option<(String, String, Rect)> {
+            self.0.clone()
+        }
+    }
+
+    #[test]
+    fn grab_uses_the_window_server_when_accessibility_fails() {
+        let front = Some(("WPS Office".to_string(), "Notes.docx".to_string(), WIN.unwrap()));
+        let color = Color(Mutex::new(vec![]), true);
+        let r = ScreenReader::new(Box::new(NoAx(front))).with_color(Box::new(color));
+        let g = r.grab_window(true).unwrap();
+        assert!(g.image.is_some(), "image still captured");
+        assert_eq!(g.label(), "WPS Office — Notes.docx");
+        assert!(g.text.is_empty());
+
+        // Neither source: a clear error naming the AX failure.
+        let r = ScreenReader::new(Box::new(NoAx(None))).with_color(Box::new(Color(Mutex::new(vec![]), true)));
+        let e = r.grab_window(true).unwrap_err().to_string();
+        assert!(e.contains("-25204") && e.contains("window server"), "{e}");
+    }
+
+    #[test]
+    fn a_focused_system_alert_or_our_own_window_is_skipped_for_the_front_window() {
+        struct Alert;
+        impl AxBackend for Alert {
+            fn read_focused(&self, l: &WalkLimits) -> Result<WindowRead> {
+                Ok(WindowRead {
+                    app: "UserNotificationCenter".into(),
+                    window_title: String::new(),
+                    bounds: Some(Rect { x: 0, y: 0, w: 260, h: 364 }),
+                    walk: walk(FakeNode::root(&FakeTree::fixture(1)), l),
+                })
+            }
+            fn front_window(&self) -> Option<(String, String, Rect)> {
+                Some(("WPS Office".into(), "Notes.docx".into(), WIN.unwrap()))
+            }
+        }
+        let calls = std::sync::Arc::new(Mutex::new(vec![]));
+        struct Rec(std::sync::Arc<Mutex<Vec<(Rect, u32)>>>);
+        impl ColorSource for Rec {
+            fn capture_color(&self, r: Rect, m: u32) -> Result<RgbFrame> {
+                self.0.lock().unwrap().push((r, m));
+                Ok(RgbFrame { width: 8, height: 4, rgb: vec![0; 96] })
+            }
+        }
+        let r = ScreenReader::new(Box::new(Alert)).with_color(Box::new(Rec(calls.clone())));
+        let g = r.grab_window(true).unwrap();
+        assert_eq!(g.label(), "WPS Office — Notes.docx");
+        assert_eq!(calls.lock().unwrap()[0].0, WIN.unwrap(), "captured the real window, not the alert");
+        assert!(!crate::reader::NOT_A_GRAB_TARGET.contains(&"WPS Office"));
+    }
+
+    #[test]
+    fn grab_walks_with_a_longer_budget_than_the_poll_loop() {
+        struct Budget(Mutex<Vec<std::time::Duration>>);
+        impl AxBackend for Budget {
+            fn read_focused(&self, l: &WalkLimits) -> Result<WindowRead> {
+                self.0.lock().unwrap().push(l.budget);
+                Ok(WindowRead { bounds: WIN, ..Default::default() })
+            }
+        }
+        let b = std::sync::Arc::new(Budget(Mutex::new(vec![])));
+        struct Shared(std::sync::Arc<Budget>);
+        impl AxBackend for Shared {
+            fn read_focused(&self, l: &WalkLimits) -> Result<WindowRead> {
+                self.0.read_focused(l)
+            }
+        }
+        let r = ScreenReader::new(Box::new(Shared(b.clone())));
+        r.grab_window(false).unwrap();
+        assert_eq!(b.0.lock().unwrap()[0], crate::reader::GRAB_WALK_BUDGET);
+    }
+
     #[test]
     fn grab_with_image_captures_the_focused_window_bounds() {
         let r = ScreenReader::new(Box::new(FakeAx(WIN))).with_color(Box::new(Color(Mutex::new(vec![]), true)));
@@ -139,6 +218,29 @@ mod real {
     #[test]
     #[ignore = "captures the real screen"]
     fn real_grab() {
+        println!("front window (window server): {:?}", crate::macos::front_window().map(|(a, t, r)| (a, t.len(), r)));
+        let t = std::time::Instant::now();
+        let ax = crate::macos::AxReader::new();
+        let res = crate::AxBackend::read_focused(&ax, &crate::WalkLimits::default());
+        println!(
+            "ax read {} ms: {:?}",
+            t.elapsed().as_millis(),
+            res.as_ref().map(|r| r.app.clone()).map_err(ToString::to_string)
+        );
+        let t = std::time::Instant::now();
+        let fw = crate::macos::front_window();
+        println!("window server {} ms", t.elapsed().as_millis());
+        if let Some((_, _, b)) = fw {
+            for i in 0..2 {
+                let t = std::time::Instant::now();
+                let f =
+                    crate::ocr::ColorSource::capture_color(&crate::macos::SckCapture, b, super::GRAB_MAX_EDGE).unwrap();
+                let c = t.elapsed().as_millis();
+                let t = std::time::Instant::now();
+                let j = super::encode_jpeg(&f, super::JPEG_QUALITY).unwrap();
+                println!("capture #{i} {c} ms, jpeg {} ms ({} bytes)", t.elapsed().as_millis(), j.len());
+            }
+        }
         let r = crate::platform_reader().unwrap();
         let t = std::time::Instant::now();
         let g = r.grab_window(true).unwrap();

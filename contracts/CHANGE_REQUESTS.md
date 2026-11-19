@@ -182,3 +182,10 @@ Format:
   - `screen.v3.md` (was v2): after the answer, at most one or two plain sentences (max 40 words) of context, only when they genuinely help. No numbered points, bullets or lists, and never pad.
 - Eval: Qwen 9/9 on v3; the grader now also fails numbered or bulleted lines after `---`.
 - Status: accepted (contracts-v1.9).
+
+## CR-22 — Screen grab without depending on Accessibility focus
+- From: lead (2026-11-19): ⌥⇧S and "Read PC screen" failed with "could not read the focused window: unavailable: no focused application".
+- Cause: the grab asked Accessibility for the focused app with a 50 ms per-message timeout (the poll loop's walk budget, applied to every AX message), and threw away the AXError. A live run on this Mac also showed Accessibility naming `UserNotificationCenter` (a system alert holding key focus) as the focused app, so the grab would capture the alert.
+- Fix (`ssc-screen`): the per-message AX timeout is at least 250 ms (the walk enforces its own budget), and a hotkey grab walks with a 1 s budget. AX errors carry their code and name. When Accessibility fails, has no bounds, or names a system overlay or the agent itself (`NOT_A_GRAB_TARGET`), the grab uses the window server's frontmost layer-0 window (`CGWindowListCopyWindowInfo`, no Accessibility needed): app, title and bounds, then the image (and OCR in local mode).
+- Verified live (release build): the window-server lookup takes under 1 ms, capture 60–110 ms, JPEG 9 ms, about 90 ms for the whole grab; it captured the real front window while AX named the notification center.
+- Status: fixed.
