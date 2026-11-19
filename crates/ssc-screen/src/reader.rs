@@ -53,6 +53,9 @@ fn is_grab_target(app: &str) -> bool {
     !NOT_A_GRAB_TARGET.iter().any(|n| n.eq_ignore_ascii_case(app.trim()))
 }
 
+/// How long the fast grab waits for the parallel Accessibility text once the image is in hand.
+pub const TEXT_GRACE: std::time::Duration = std::time::Duration::from_millis(40);
+
 /// The screen hotkey is user-initiated: a longer walk budget than the 1 s poll loop's 50 ms.
 pub const GRAB_WALK_BUDGET: std::time::Duration = std::time::Duration::from_millis(1000);
 
@@ -64,7 +67,7 @@ struct Ocr {
 }
 
 pub struct ScreenReader {
-    ax: Box<dyn AxBackend>,
+    ax: Arc<dyn AxBackend>,
     ocr: Option<Ocr>,
     color: Option<Box<dyn ColorSource>>,
     limits: WalkLimits,
@@ -73,7 +76,7 @@ pub struct ScreenReader {
 
 impl ScreenReader {
     pub fn new(ax: Box<dyn AxBackend>) -> Self {
-        Self { ax, ocr: None, color: None, limits: WalkLimits::default(), clock: Arc::new(SystemClock) }
+        Self { ax: Arc::from(ax), ocr: None, color: None, limits: WalkLimits::default(), clock: Arc::new(SystemClock) }
     }
     /// Enables colour capture for [`Self::grab`] (CR-20).
     pub fn with_color(mut self, color: Box<dyn ColorSource>) -> Self {
@@ -124,6 +127,13 @@ impl ScreenReader {
     /// usual OCR fallback.
     pub fn grab_window(&self, image: bool) -> Result<crate::grab::ScreenGrab> {
         let limits = WalkLimits { budget: self.limits.budget.max(GRAB_WALK_BUDGET), ..self.limits };
+        if image
+            && let Some(c) = &self.color
+            && let Some((app, title, b)) =
+                self.ax.front_window().filter(|(a, _, b)| is_grab_target(a) && b.w > 0 && b.h > 0)
+        {
+            return self.grab_fast(c.as_ref(), app, title, b, limits);
+        }
         // CR-22: if Accessibility can't name the focused window, the window server still knows
         // the frontmost one; the image (and OCR) need only its bounds.
         let read = match self.ax.read_focused(&limits) {
@@ -183,6 +193,47 @@ impl ScreenReader {
         }
         let snap = self.snapshot_from(read);
         Ok(crate::grab::make_grab(snap, None, capture_error))
+    }
+
+    /// CR-22b fast path, like ⌘⇧5: the window server names the front window (<1 ms), the pixels
+    /// are captured at once, and the Accessibility text is read on another thread at the same
+    /// time. The text rides along only if it is ready by [`TEXT_GRACE`] after the capture; a slow
+    /// or hung app never delays the image (the model reads the image anyway).
+    fn grab_fast(
+        &self,
+        color: &dyn ColorSource,
+        app: String,
+        title: String,
+        b: Rect,
+        limits: WalkLimits,
+    ) -> Result<crate::grab::ScreenGrab> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ax = self.ax.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(ax.read_focused(&limits)); // receiver gone = too late, fine
+        });
+        let frame = color.capture_color(b, crate::grab::GRAB_MAX_EDGE);
+        let text = match rx.recv_timeout(TEXT_GRACE) {
+            // Only the same app's text: focus may sit on an alert while the front window is the doc.
+            Ok(Ok(r)) if r.app.eq_ignore_ascii_case(&app) => Some(r),
+            _ => None,
+        };
+        let window_title =
+            if title.is_empty() { text.as_ref().map(|r| r.window_title.clone()).unwrap_or_default() } else { title };
+        let snap = ScreenSnapshot {
+            app,
+            window_title,
+            nodes: text.map(|r| r.walk.nodes).unwrap_or_default(),
+            source: ScreenTextSource::Accessibility,
+            captured_at_ms: self.clock.now_ms(),
+        };
+        match frame {
+            Ok(f) => {
+                let jpeg = crate::grab::encode_jpeg(&f, crate::grab::JPEG_QUALITY)?;
+                Ok(crate::grab::make_grab(snap, Some((f.width, f.height, jpeg)), None))
+            }
+            Err(e) => Ok(crate::grab::make_grab(snap, None, Some(e.to_string()))),
+        }
     }
 
     fn snapshot_from(&self, read: WindowRead) -> ScreenSnapshot {

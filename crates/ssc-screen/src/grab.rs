@@ -160,6 +160,49 @@ mod tests {
         assert!(!crate::reader::NOT_A_GRAB_TARGET.contains(&"WPS Office"));
     }
 
+    /// Accessibility that takes `delay` and reports `app`; the window server says WPS is in front.
+    struct SlowAx(std::time::Duration, &'static str);
+    impl AxBackend for SlowAx {
+        fn read_focused(&self, l: &WalkLimits) -> Result<WindowRead> {
+            std::thread::sleep(self.0);
+            Ok(WindowRead {
+                app: self.1.into(),
+                window_title: "Notes.docx".into(),
+                bounds: WIN,
+                walk: walk(FakeNode::root(&FakeTree::fixture(2)), l),
+            })
+        }
+        fn front_window(&self) -> Option<(String, String, Rect)> {
+            Some(("WPS Office".into(), String::new(), WIN.unwrap()))
+        }
+    }
+
+    #[test]
+    fn fast_grab_never_waits_for_slow_accessibility() {
+        let r = ScreenReader::new(Box::new(SlowAx(std::time::Duration::from_secs(2), "WPS Office")))
+            .with_color(Box::new(Color(Mutex::new(vec![]), true)));
+        let t = std::time::Instant::now();
+        let g = r.grab_window(true).unwrap();
+        assert!(t.elapsed() < std::time::Duration::from_millis(500), "waited {:?}", t.elapsed());
+        assert!(g.image.is_some());
+        assert!(g.text.is_empty(), "text arrived too late: left out");
+        assert_eq!(g.label(), "WPS Office");
+    }
+
+    #[test]
+    fn fast_grab_includes_text_that_is_ready_and_from_the_same_app() {
+        let r = ScreenReader::new(Box::new(SlowAx(std::time::Duration::ZERO, "WPS Office")))
+            .with_color(Box::new(Color(Mutex::new(vec![]), true)));
+        let g = r.grab_window(true).unwrap();
+        assert!(g.image.is_some() && !g.text.is_empty());
+        assert_eq!(g.label(), "WPS Office — Notes.docx", "title from AX when the window server has none");
+        // Focus on an alert: its text is not the front window's.
+        let r = ScreenReader::new(Box::new(SlowAx(std::time::Duration::ZERO, "UserNotificationCenter")))
+            .with_color(Box::new(Color(Mutex::new(vec![]), true)));
+        let g = r.grab_window(true).unwrap();
+        assert!(g.image.is_some() && g.text.is_empty());
+    }
+
     #[test]
     fn grab_walks_with_a_longer_budget_than_the_poll_loop() {
         struct Budget(Mutex<Vec<std::time::Duration>>);
