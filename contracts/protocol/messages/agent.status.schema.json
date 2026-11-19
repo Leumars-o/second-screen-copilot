@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/messages/agent.status.schema.json",
+  "title": "AgentStatus",
+  "description": "PC -> phone (CR-23): agent health for the phone's status line and Logs tab. Sent on agent.sync, every 15 s, and when the health changes.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["health", "summary", "checks", "capturing", "t"],
+  "properties": {
+    "health": { "enum": ["ok", "warn", "error"] },
+    "summary": { "type": "string", "minLength": 1, "maxLength": 200 },
+    "checks": {
+      "type": "array",
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "label", "state", "detail"],
+        "properties": {
+          "id": { "type": "string", "pattern": "^[a-z_]{1,32}$" },
+          "label": { "type": "string", "minLength": 1, "maxLength": 64 },
+          "state": { "enum": ["ok", "warn", "error", "off"] },
+          "detail": { "type": "string", "maxLength": 200 }
+        }
+      }
+    },
+    "capturing": { "type": "boolean" },
+    "t": { "type": "integer", "minimum": 0 }
+  }
+}

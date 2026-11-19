@@ -28,6 +28,8 @@ const JPEG: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0, 1, 2, 3, 0xFF, 0xD9];
 struct WordWindow {
     grabs: Mutex<Vec<bool>>,
     snapshots: AtomicUsize,
+    /// Fail every grab like the lead's "no focused application".
+    fail: bool,
 }
 
 impl WordWindow {
@@ -49,6 +51,9 @@ impl ScreenSource for WordWindow {
     }
     fn grab(&self, image: bool) -> Result<ScreenGrab> {
         self.grabs.lock().unwrap().push(image);
+        if self.fail {
+            return Err(ssc_core::SscError::Unavailable("no focused application (AXError -25204)".into()));
+        }
         let mut g = ScreenGrab::from_snapshot(Self::snap(), None);
         if image {
             g.image = Some(PromptImage { mime: "image/jpeg".into(), data: JPEG.to_vec() });
@@ -69,6 +74,10 @@ struct Rig {
 }
 
 fn rig(mode: Mode, screen_watch: bool, responses: &[&str]) -> Rig {
+    rig_with(mode, screen_watch, responses, false)
+}
+
+fn rig_with(mode: Mode, screen_watch: bool, responses: &[&str], fail_grabs: bool) -> Rig {
     let clock = Arc::new(TokioClock::new(BASE_MS));
     let memory = seeded_memory(clock.clone());
     let model = Arc::new(ScriptedAnswer::new(
@@ -85,7 +94,7 @@ fn rig(mode: Mode, screen_watch: bool, responses: &[&str]) -> Rig {
     .unwrap();
     let (pc, ph) = MockTransport::pair_with_clock(clock.clone());
     let phone = phone(Arc::new(ph), 12);
-    let screen = Arc::new(WordWindow::default());
+    let screen = Arc::new(WordWindow { fail: fail_grabs, ..Default::default() });
     let parts = Parts {
         screen: Some(screen.clone() as Arc<dyn ScreenSource>),
         audio: vec![],
@@ -212,4 +221,43 @@ async fn phone_screen_command_reads_the_screen_and_answers() {
     assert_eq!(wait_end(&mut r).await.reason, AnswerEndReason::Done);
     assert_eq!(*r.screen.grabs.lock().unwrap(), vec![true]);
     assert_eq!(r.model.prompts.lock().unwrap()[0].images.len(), 1);
+}
+
+/// CR-23: a failed screen read shows up in agent.status (via the agent's provider) and in the
+/// agent.log backlog the phone gets on agent.sync.
+#[tokio::test(start_paused = true)]
+async fn failed_screen_read_reaches_the_phone_status_and_logs() {
+    let mut r = rig_with(Mode::Cloud, false, &[], true);
+    r.pipeline.set_status_provider(Arc::new(|h: &ssc_pipeline::PipelineHealth| {
+        let (health, summary) = match &h.last_grab {
+            Some((_, CheckState::Error, d)) => (Health::Error, format!("Last screen read: {d}")),
+            _ => (Health::Ok, "All good".to_string()),
+        };
+        AgentStatus { health, summary, checks: vec![], capturing: h.capturing, t: 0 }
+    }));
+    let first = r.phone.wait_for("initial status", |m| matches!(m, Message::AgentStatus(_))).await;
+    let Message::AgentStatus(s) = first.message else { unreachable!() };
+    assert_eq!(s.health, Health::Ok);
+
+    r.pipeline.answer_from_screen().unwrap();
+    let env =
+        r.phone.wait_for("error status", |m| matches!(m, Message::AgentStatus(s) if s.health == Health::Error)).await;
+    let Message::AgentStatus(s) = env.message else { unreachable!() };
+    assert!(s.summary.contains("no focused application"), "{}", s.summary);
+    // The card closes with an error instead of hanging, and the log line streams live
+    // (the batch goes out 0.5 s after the line).
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    {
+        let got = r.phone.got.lock().unwrap();
+        assert!(got.iter().any(|e| matches!(&e.message, Message::AnswerEnd(x) if x.reason == AnswerEndReason::Error)));
+        assert!(got.iter().any(|e| matches!(&e.message, Message::AgentLog(l)
+            if l.entries.iter().any(|e| e.level == LogLevel::Error && e.text.contains("could not read the focused window")))));
+    }
+    r.phone.send(None, Command::AgentSync).await;
+    r.phone.wait_for("status on sync", |m| matches!(m, Message::AgentStatus(_))).await;
+    let env = r.phone.wait_for("backlog", |m| matches!(m, Message::AgentLog(l) if l.entries.len() > 1 || l.entries.iter().any(|e| e.text.contains("focused window")))).await;
+    let Message::AgentLog(b) = env.message else { unreachable!() };
+    assert!(b.entries.iter().any(|e| e.text.contains("could not read the focused window")));
+    // Never prompts or screen text in the log feed.
+    assert!(b.entries.iter().all(|e| !e.text.contains("===== PREFIX")));
 }

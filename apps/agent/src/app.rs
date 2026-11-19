@@ -62,13 +62,20 @@ impl AppState {
         let progress = move |p: ssc_memory::download::Progress<'_>| {
             *dl.lock().unwrap() = Some(progress_text("embedder", &p));
         };
-        let r = system::build(cfg, self.secrets.clone(), &progress).await;
+        let r = system::build(cfg.clone(), self.secrets.clone(), &progress).await;
         *self.download.lock().unwrap() = None;
         match r {
             Ok(s) => {
                 *self.last_error.lock().unwrap() = None;
                 let need_whisper = system::needs_whisper_download(&s);
-                if let Some(old) = self.system.replace(Some(Arc::new(s))) {
+                let s = Arc::new(s);
+                // CR-23: agent.status for the phone. Weak: the pipeline lives inside the system.
+                let weak = Arc::downgrade(&s);
+                let lan: crate::health::LanStatusFn =
+                    Arc::new(move || weak.upgrade().map_or(ssc_transport::LanTlsStatus::Off, |s| s.lan_tls.status()));
+                s.pipeline.set_status_provider(crate::health::provider(cfg.clone(), self.secrets.clone(), lan));
+                ssc_core::logbus::info("ssc-agent", format!("agent started ({:?} mode)", cfg.mode));
+                if let Some(old) = self.system.replace(Some(s)) {
                     shutdown(&self.secrets, old).await;
                 }
                 if need_whisper {
@@ -76,7 +83,7 @@ impl AppState {
                 }
             }
             Err(e) => {
-                eprintln!("[ssc-agent] agent failed to start: {e}");
+                ssc_core::logbus::error("ssc-agent", format!("agent failed to start: {e}"));
                 *self.last_error.lock().unwrap() = Some(e.to_string());
                 if let Some(old) = self.system.take() {
                     shutdown(&self.secrets, old).await;
@@ -310,7 +317,7 @@ async fn toggle_capture_inner(app: &AppHandle, profile: Option<String>) -> Res<b
         // Summary + follow-up can take a while: don't hold the UI.
         tauri::async_runtime::spawn(async move {
             if let Err(e) = p.end_session(SessionEndReason::User).await {
-                eprintln!("[ssc-agent] end session: {e}");
+                ssc_core::logbus::error("ssc-agent", format!("end session failed: {e}"));
             }
         });
         false
@@ -440,9 +447,9 @@ fn register_hotkeys(app: &AppHandle, cfg: &Config) -> Vec<(Shortcut, Hotkey)> {
         match spec.parse::<Shortcut>() {
             Ok(s) => match app.global_shortcut().register(s) {
                 Ok(()) => out.push((s, action)),
-                Err(e) => eprintln!("[ssc-agent] hotkey {spec}: {e}"),
+                Err(e) => ssc_core::logbus::error("ssc-agent", format!("hotkey {spec} could not be registered: {e}")),
             },
-            Err(e) => eprintln!("[ssc-agent] hotkey {spec} invalid: {e}"),
+            Err(e) => ssc_core::logbus::error("ssc-agent", format!("hotkey {spec} invalid: {e}")),
         }
     }
     out
@@ -450,7 +457,7 @@ fn register_hotkeys(app: &AppHandle, cfg: &Config) -> Vec<(Shortcut, Hotkey)> {
 
 pub fn run() {
     let cfg = Config::load(&Config::default_path()).unwrap_or_else(|e| {
-        eprintln!("[ssc-agent] config invalid, using defaults: {e}");
+        ssc_core::logbus::warn("ssc-agent", format!("config invalid, using defaults: {e}"));
         Config::default()
     });
     let state = AppState {

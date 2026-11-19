@@ -33,9 +33,9 @@ use ssc_context::{Budget, ContextInput, Known, KnownKind, PromptKind, assemble, 
 use ssc_core::config::Config;
 use ssc_core::decision::Tier;
 use ssc_core::protocol::{
-    AnswerDelta, AnswerEnd, AnswerEndReason, AnswerFormat, AnswerStart, Block, Command, Cue, FeedbackItem, Intent,
-    Layer, MemorySnapshot, Message, Mode, SessionEnd, SessionEndReason, SessionStart, SessionSummary,
-    TranscriptPartial, Trigger, Urgency,
+    AgentLog, AgentStatus, AnswerDelta, AnswerEnd, AnswerEndReason, AnswerFormat, AnswerStart, Block, CheckState,
+    Command, Cue, FeedbackItem, Intent, Layer, MemorySnapshot, Message, Mode, SessionEnd, SessionEndReason,
+    SessionStart, SessionSummary, TranscriptPartial, Trigger, Urgency,
 };
 use ssc_core::timing::{Stage, Timing};
 use ssc_core::traits::{
@@ -279,8 +279,32 @@ struct Inner {
     external_frame_sent: bool,
     /// answer_id → the grab a screen answer used (newest last, at most [`MAX_REMEMBERED_GRABS`]).
     screen_grabs: Mutex<Vec<(Uuid, Arc<ScreenGrab>)>>,
+    /// CR-23: health facts, the agent's status builder, and a nudge to send status now.
+    health: Mutex<PipelineHealth>,
+    status_provider: Mutex<Option<StatusProvider>>,
+    status_now: tokio::sync::Notify,
     cancel: CancellationToken,
 }
+
+/// CR-23: what the pipeline knows about its own health, for the agent's status builder.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct PipelineHealth {
+    /// A capture session is running.
+    pub capturing: bool,
+    /// Last answer: (PC ms, state, detail: the model, or the error).
+    pub last_answer: Option<(u64, CheckState, String)>,
+    /// Last screen grab: (PC ms, state, detail: the window, or the error).
+    pub last_grab: Option<(u64, CheckState, String)>,
+}
+
+/// Builds `agent.status` from the pipeline's facts plus what only the agent knows (permissions,
+/// keys, link). Set with [`Pipeline::set_status_provider`].
+pub type StatusProvider = Arc<dyn Fn(&PipelineHealth) -> AgentStatus + Send + Sync>;
+
+/// `agent.status` cadence (the phone treats ~3 missed beats as "PC silent").
+pub const STATUS_EVERY: Duration = Duration::from_secs(15);
+/// New log lines are batched for this long before one `agent.log` goes out.
+const LOG_BATCH: Duration = Duration::from_millis(500);
 
 /// Cheap to clone; all clones drive the same agent.
 #[derive(Clone)]
@@ -298,7 +322,9 @@ const SHORTER_CUES: usize = 3;
 const TRANSCRIPT_CONTEXT_SEGMENTS: usize = 200;
 
 fn log(msg: impl AsRef<str>) {
-    eprintln!("[ssc-pipeline] {}", msg.as_ref());
+    // CR-23: also to the phone's Logs tab (operational lines only, never prompts).
+    let msg = msg.as_ref();
+    ssc_core::logbus::emit(ssc_core::logbus::infer_level(msg), "ssc-pipeline", msg);
 }
 
 impl Pipeline {
@@ -320,6 +346,9 @@ impl Pipeline {
             answers: Mutex::new(HashMap::new()),
             answer_seq: AtomicU64::new(0),
             screen_grabs: Mutex::new(Vec::new()),
+            health: Mutex::new(PipelineHealth::default()),
+            status_provider: Mutex::new(None),
+            status_now: tokio::sync::Notify::new(),
             first_frame: Mutex::new(HashMap::new()),
             speculative: Mutex::new(HashMap::new()),
             active_answers: AtomicUsize::new(0),
@@ -338,7 +367,25 @@ impl Pipeline {
             }
             None => log("transport incoming stream already taken: phone commands disabled"),
         }
+        tokio::spawn(log_forward_loop(inner.clone()));
+        tokio::spawn(status_loop(inner.clone()));
         Self { inner }
+    }
+
+    /// CR-23: the agent's `agent.status` builder. Sends a status right away.
+    pub fn set_status_provider(&self, f: StatusProvider) {
+        *self.inner.status_provider.lock().unwrap() = Some(f);
+        self.inner.status_now.notify_one();
+    }
+
+    /// CR-23: the pipeline's health facts.
+    pub fn health(&self) -> PipelineHealth {
+        health_now(&self.inner)
+    }
+
+    /// CR-23: the current `agent.status`, if a provider is set.
+    pub fn status(&self) -> Option<AgentStatus> {
+        build_status(&self.inner)
     }
 
     pub fn timing(&self) -> Arc<Timing> {
@@ -471,6 +518,8 @@ impl Pipeline {
                 Ok(g) => g,
                 Err(e) => {
                     log(format!("screen hotkey: could not read the focused window: {e}"));
+                    let now = inner.parts.clock.now_ms();
+                    set_health(&inner, |h| h.last_grab = Some((now, CheckState::Error, e.to_string())));
                     let empty = ScreenGrab {
                         app: String::new(),
                         window_title: String::new(),
@@ -489,6 +538,12 @@ impl Pipeline {
             if let Some(e) = &grab.image_error {
                 log(format!("screen hotkey: no image ({e}); answering from the window text"));
             }
+            let now = inner.parts.clock.now_ms();
+            let (state, detail) = match (&grab.image_error, image) {
+                (Some(e), true) => (CheckState::Warn, format!("{} (no image: {e})", grab.label())),
+                _ => (CheckState::Ok, grab.label()),
+            };
+            set_health(&inner, |h| h.last_grab = Some((now, state, detail)));
             let grab = Arc::new(grab);
             remember_grab(&inner, id, grab.clone());
             run_answer(inner, Job::screen(id, Trigger::Hotkey, profile, grab), cancel, None).await;
@@ -1108,6 +1163,13 @@ async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken, gate
         None => run.await,
     };
     let fallback_model = || mrx.borrow().clone().unwrap_or_else(|| inner.parts.answers.primary_model().to_string());
+    let now = inner.parts.clock.now_ms();
+    match &res {
+        Ok(Ok(o)) => set_health(&inner, |h| h.last_answer = Some((now, CheckState::Ok, o.fast.model.clone()))),
+        Ok(Err(SscError::Cancelled)) => {}
+        Ok(Err(e)) => set_health(&inner, |h| h.last_answer = Some((now, CheckState::Error, e.to_string()))),
+        Err(e) => set_health(&inner, |h| h.last_answer = Some((now, CheckState::Error, format!("answer task: {e}")))),
+    }
     let (mut end, model) = match res {
         Ok(Ok(outcome)) => {
             let parsed = match &job.expand {
@@ -1156,14 +1218,13 @@ fn image_note(p: &Prompt) -> String {
 }
 
 fn print_debug_answer(job: &Job, model: &str, prefix: &str, dynamic: &str, images: &str, output: &str) {
-    log(format!(
-        "debug answer {} format {:?} trigger {:?} model {model} images: {}\n===== PREFIX =====\n{prefix}\n===== DYNAMIC =====\n{dynamic}\n===== OUTPUT =====\n{output}\n===== END {} =====",
-        job.answer_id,
-        job.format,
-        job.trigger,
-        if images.is_empty() { "none" } else { images },
-        job.answer_id,
-    ));
+    // stderr only: prompts hold screen/call content and must never reach the phone log feed.
+    let id = job.answer_id;
+    let images = if images.is_empty() { "none" } else { images };
+    eprintln!(
+        "[ssc-pipeline] debug answer {id} format {:?} trigger {:?} model {model} images: {images}\n===== PREFIX =====\n{prefix}\n===== DYNAMIC =====\n{dynamic}\n===== OUTPUT =====\n{output}\n===== END {id} =====",
+        job.format, job.trigger,
+    );
 }
 
 fn end_with(id: Uuid, reason: AnswerEndReason) -> AnswerEnd {
@@ -1291,6 +1352,65 @@ async fn command_loop(inner: Arc<Inner>, mut rx: mpsc::Receiver<ssc_core::protoc
     }
 }
 
+fn health_now(inner: &Inner) -> PipelineHealth {
+    let mut h = inner.health.lock().unwrap().clone();
+    h.capturing = inner.live.lock().unwrap().session_id.is_some();
+    h
+}
+
+fn build_status(inner: &Inner) -> Option<AgentStatus> {
+    let f = inner.status_provider.lock().unwrap().clone()?;
+    Some(f(&health_now(inner)))
+}
+
+/// Record a health fact and push a fresh status.
+fn set_health(inner: &Inner, f: impl FnOnce(&mut PipelineHealth)) {
+    f(&mut inner.health.lock().unwrap());
+    inner.status_now.notify_one();
+}
+
+/// CR-23: `agent.status` every [`STATUS_EVERY`] and whenever nudged. Sends go straight to the
+/// transport and are never logged (a dead link must not feed the log it is reporting).
+async fn status_loop(inner: Arc<Inner>) {
+    let mut tick = tokio::time::interval(STATUS_EVERY);
+    loop {
+        tokio::select! {
+            _ = inner.cancel.cancelled() => break,
+            _ = tick.tick() => {}
+            _ = inner.status_now.notified() => {}
+        }
+        if let Some(s) = build_status(&inner) {
+            let _ = inner.parts.transport.send(None, Message::AgentStatus(s)).await;
+        }
+    }
+}
+
+/// CR-23: new log lines to the phone, batched. Same no-logging rule as [`status_loop`].
+async fn log_forward_loop(inner: Arc<Inner>) {
+    use tokio::sync::broadcast::error::RecvError;
+    let mut rx = ssc_core::logbus::subscribe();
+    loop {
+        let first = tokio::select! {
+            _ = inner.cancel.cancelled() => break,
+            r = rx.recv() => match r {
+                Ok(e) => e,
+                Err(RecvError::Lagged(_)) => continue, // the backlog on agent.sync has them
+                Err(RecvError::Closed) => break,
+            },
+        };
+        let mut entries = vec![first];
+        let deadline = tokio::time::Instant::now() + LOG_BATCH;
+        while entries.len() < ssc_core::logbus::BACKLOG {
+            match tokio::time::timeout_at(deadline, rx.recv()).await {
+                Ok(Ok(e)) => entries.push(e),
+                Ok(Err(RecvError::Lagged(_))) => {}
+                _ => break,
+            }
+        }
+        let _ = inner.parts.transport.send(None, Message::AgentLog(AgentLog { entries })).await;
+    }
+}
+
 fn meta(inner: &Inner, id: Uuid) -> Option<AnswerMeta> {
     inner.answers.lock().unwrap().get(&id).map(|(_, m)| m.clone())
 }
@@ -1355,6 +1475,17 @@ fn answer_cancel(inner: &Inner) -> CancellationToken {
 async fn handle_command(inner: Arc<Inner>, c: Command) {
     let mem = inner.parts.memory.clone();
     let job = match c {
+        Command::AgentSync => {
+            // CR-23: status first (the phone's status line), then the backlog.
+            if let Some(s) = build_status(&inner) {
+                let _ = inner.parts.transport.send(None, Message::AgentStatus(s)).await;
+            }
+            let entries = ssc_core::logbus::backlog();
+            if !entries.is_empty() {
+                let _ = inner.parts.transport.send(None, Message::AgentLog(AgentLog { entries })).await;
+            }
+            None
+        }
         Command::Screen => {
             // CR-21: same path as the screen hotkey.
             let _ = Pipeline { inner: inner.clone() }.answer_from_screen();

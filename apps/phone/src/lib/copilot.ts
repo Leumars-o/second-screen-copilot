@@ -2,6 +2,8 @@
 // React subscribers; streamed deltas bypass React and go straight to a per-answer DOM sink, so a
 // delta costs one text-node append (append-only, no re-render, no reflow of earlier content).
 import type {
+  AgentLog,
+  AgentStatus,
   AnswerEnd,
   AnswerStart,
   AnyEnvelope,
@@ -41,6 +43,11 @@ export interface CopilotState {
   memory: MemorySnapshot["items"] | null;
   transcript: TranscriptPartial[]; // last few lines
   confirmedContacts: Record<string, boolean>;
+  /** CR-23: the PC's health, and when it arrived (phone clock, ms). */
+  agentStatus: AgentStatus | null;
+  agentStatusAt: number | null;
+  /** CR-23: agent log lines, oldest first (deduplicated, last MAX_LOGS). */
+  logs: AgentLog["entries"];
 }
 
 export interface CopilotDeps {
@@ -53,6 +60,9 @@ export interface CopilotDeps {
 
 const MAX_ANSWERS = 50;
 const MAX_TRANSCRIPT = 6;
+export const MAX_LOGS = 300;
+
+const logKey = (e: AgentLog["entries"][number]) => `${e.t}|${e.source}|${e.level}|${e.text}`;
 
 function defaultAfterPaint(cb: () => void): void {
   if (typeof requestAnimationFrame === "function") requestAnimationFrame(() => setTimeout(cb, 0));
@@ -68,6 +78,9 @@ export class Copilot {
     memory: null,
     transcript: [],
     confirmedContacts: {},
+    agentStatus: null,
+    agentStatusAt: null,
+    logs: [],
   };
   private readonly listeners = new Set<() => void>();
   private readonly sinks = new Map<string, DeltaSink>();
@@ -129,6 +142,16 @@ export class Copilot {
         return this.set({ summaries: [env.payload, ...this.state.summaries.filter((s) => s.session_id !== env.payload.session_id)] });
       case "memory.snapshot":
         return this.set({ memory: env.payload.items });
+      case "agent.status":
+        return this.set({ agentStatus: env.payload, agentStatusAt: Date.now() });
+      case "agent.log": {
+        // The backlog on agent.sync overlaps lines already streamed live: keep each line once.
+        const seen = new Set(this.state.logs.map(logKey));
+        const fresh = env.payload.entries.filter((e) => !seen.has(logKey(e)));
+        if (!fresh.length) return;
+        const logs = [...this.state.logs, ...fresh].sort((a, b) => a.t - b.t).slice(-MAX_LOGS);
+        return this.set({ logs });
+      }
       case "transcript.partial": {
         const t = this.state.transcript;
         const last = t[t.length - 1];
@@ -184,6 +207,11 @@ export class Copilot {
 
   simple(action: "regenerate" | "shorter" | "number", id: string): void {
     void this.command({ action, answer_id: id });
+  }
+
+  /** CR-23: ask for the PC's status and log backlog (on every connect, and from the Logs tab). */
+  syncAgent(): Promise<boolean> {
+    return this.command({ action: "agent.sync" });
   }
 
   /** CR-21: ask the PC to read its focused window and answer it (the screen hotkey). */

@@ -33,6 +33,6 @@ pub mod transport;
 
 pub use clock::TokioClock;
 pub use decision::RoutedDecisions;
-pub use pipeline::{Parts, Pipeline, Settings};
+pub use pipeline::{Parts, Pipeline, PipelineHealth, STATUS_EVERY, Settings, StatusProvider};
 pub use stats::{StageStat, stage_stats};
 pub use stt_select::{SttChoice, choose_stt};

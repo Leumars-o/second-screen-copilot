@@ -151,7 +151,7 @@ pub async fn start_transport_with(
                 let (s, d) = (secrets.clone(), dir.clone());
                 let r = tokio::task::spawn_blocking(move || store_device(&*s, &d, &dev)).await;
                 if !matches!(r, Ok(Ok(()))) {
-                    eprintln!("[ssc-pipeline] could not persist the paired device");
+                    ssc_core::logbus::error("ssc-pipeline", "could not persist the paired device");
                 }
             }
         });

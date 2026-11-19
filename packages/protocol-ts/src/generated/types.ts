@@ -17,7 +17,9 @@ export interface Envelope {
     | "command"
     | "heartbeat"
     | "session.summary"
-    | "memory.snapshot";
+    | "memory.snapshot"
+    | "agent.status"
+    | "agent.log";
   seq: number;
   /**
    * Sender clock, unix ms.
@@ -44,6 +46,42 @@ export interface QrPayload {
   pc_pub: string;
   token: string;
   exp: number;
+}
+
+// ---- agent.log ----
+/**
+ * PC -> phone (CR-23): agent log lines, oldest first. The backlog (last 200) on agent.sync, then new lines as they happen. Never carries prompts or screen/call content.
+ */
+export interface AgentLog {
+  /**
+   * @maxItems 200
+   */
+  entries: {
+    t: number;
+    level: "info" | "warn" | "error";
+    source: string;
+    text: string;
+  }[];
+}
+
+// ---- agent.status ----
+/**
+ * PC -> phone (CR-23): agent health for the phone's status line and Logs tab. Sent on agent.sync, every 15 s, and when the health changes.
+ */
+export interface AgentStatus {
+  health: "ok" | "warn" | "error";
+  summary: string;
+  /**
+   * @maxItems 16
+   */
+  checks: {
+    id: string;
+    label: string;
+    state: "ok" | "warn" | "error" | "off";
+    detail: string;
+  }[];
+  capturing: boolean;
+  t: number;
 }
 
 // ---- answer.delta ----
@@ -115,6 +153,9 @@ export type Command =
     }
   | {
       action: "screen";
+    }
+  | {
+      action: "agent.sync";
     }
   | {
       action: "followup";
@@ -255,6 +296,8 @@ export interface TranscriptPartial {
 
 /** Message type -> payload type. */
 export interface PayloadMap {
+  "agent.log": AgentLog;
+  "agent.status": AgentStatus;
   "answer.delta": AnswerDelta;
   "answer.end": AnswerEnd;
   "answer.start": AnswerStart;

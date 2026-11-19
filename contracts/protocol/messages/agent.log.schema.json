@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ssc.local/protocol/messages/agent.log.schema.json",
+  "title": "AgentLog",
+  "description": "PC -> phone (CR-23): agent log lines, oldest first. The backlog (last 200) on agent.sync, then new lines as they happen. Never carries prompts or screen/call content.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entries"],
+  "properties": {
+    "entries": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["t", "level", "source", "text"],
+        "properties": {
+          "t": { "type": "integer", "minimum": 0 },
+          "level": { "enum": ["info", "warn", "error"] },
+          "source": { "type": "string", "minLength": 1, "maxLength": 32 },
+          "text": { "type": "string", "minLength": 1, "maxLength": 500 }
+        }
+      }
+    }
+  }
+}

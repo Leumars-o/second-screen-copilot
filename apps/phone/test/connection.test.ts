@@ -38,3 +38,14 @@ describe("CR-19 pairing links", () => {
     expect(takePairFromLocation()).toBeNull();
   });
 });
+
+describe("link state is scoped to its pairing (re-pair race)", () => {
+  const s = { state: { nextSendSeq: 5, lastRecvSeq: 9 }, sessionId: null };
+  it("ignores state saved by another pairing, keeps its own and untagged (pre-fix) state", () => {
+    expect(restoreLinkState({ ...s, room: "old" }, "new")).toBeNull();
+    expect(restoreLinkState({ ...s, room: "new" }, "new")!.state.lastRecvSeq).toBe(9);
+    // Untagged state from before the fix must survive the upgrade, or the PC would reject the
+    // phone's restarted (seq 0) frames as replays.
+    expect(restoreLinkState(s, "new")!.state.nextSendSeq).toBe(5 + SEQ_RESERVATION);
+  });
+});

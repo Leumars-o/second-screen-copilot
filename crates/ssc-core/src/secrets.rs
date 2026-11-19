@@ -60,6 +60,10 @@ impl Secret {
     pub fn expose(&self) -> &str {
         &self.0
     }
+    /// Whether a value is set, without exposing it (health checks, CR-23).
+    pub fn is_empty(&self) -> bool {
+        self.0.trim().is_empty()
+    }
 }
 
 impl fmt::Debug for Secret {

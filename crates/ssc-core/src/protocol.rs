@@ -240,6 +240,72 @@ pub struct MemorySnapshot {
     pub items: Vec<MemoryItem>,
 }
 
+/// CR-23: agent health for the phone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentStatus {
+    pub health: Health,
+    /// One line for the phone's main screen ("All good · …" or the first problem).
+    pub summary: String,
+    pub checks: Vec<HealthCheck>,
+    pub capturing: bool,
+    /// PC clock, unix ms.
+    pub t: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Health {
+    Ok,
+    Warn,
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HealthCheck {
+    /// `[a-z_]{1,32}`, e.g. "screen_recording".
+    pub id: String,
+    pub label: String,
+    pub state: CheckState,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CheckState {
+    Ok,
+    Warn,
+    Error,
+    /// Not in use (e.g. capture stopped): not a problem.
+    Off,
+}
+
+/// CR-23: agent log lines for the phone's Logs tab.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AgentLog {
+    pub entries: Vec<LogEntry>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LogEntry {
+    /// PC clock, unix ms.
+    pub t: u64,
+    pub level: LogLevel,
+    pub source: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    Info,
+    Warn,
+    Error,
+}
+
 /// Create (no `id`) or edit a memory item.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -280,6 +346,9 @@ pub enum Command {
     /// CR-21: the screen hotkey, from the phone.
     #[serde(rename = "screen")]
     Screen,
+    /// CR-23: send `agent.status` and the `agent.log` backlog now.
+    #[serde(rename = "agent.sync")]
+    AgentSync,
     #[serde(rename = "followup")]
     Followup {
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -327,6 +396,10 @@ pub enum Message {
     SessionSummary(SessionSummary),
     #[serde(rename = "memory.snapshot")]
     MemorySnapshot(MemorySnapshot),
+    #[serde(rename = "agent.status")]
+    AgentStatus(AgentStatus),
+    #[serde(rename = "agent.log")]
+    AgentLog(AgentLog),
 }
 
 impl Message {
@@ -344,6 +417,8 @@ impl Message {
             Message::Heartbeat(_) => "heartbeat",
             Message::SessionSummary(_) => "session.summary",
             Message::MemorySnapshot(_) => "memory.snapshot",
+            Message::AgentStatus(_) => "agent.status",
+            Message::AgentLog(_) => "agent.log",
         }
     }
 }
@@ -453,6 +528,8 @@ pub const SCHEMAS: &[(&str, &str)] = &[
     ("heartbeat", include_str!("../../../contracts/protocol/messages/heartbeat.schema.json")),
     ("session.summary", include_str!("../../../contracts/protocol/messages/session.summary.schema.json")),
     ("memory.snapshot", include_str!("../../../contracts/protocol/messages/memory.snapshot.schema.json")),
+    ("agent.status", include_str!("../../../contracts/protocol/messages/agent.status.schema.json")),
+    ("agent.log", include_str!("../../../contracts/protocol/messages/agent.log.schema.json")),
 ];
 pub const ENVELOPE_SCHEMA: &str = include_str!("../../../contracts/protocol/envelope.schema.json");
 pub const QR_SCHEMA: &str = include_str!("../../../contracts/protocol/qr.schema.json");

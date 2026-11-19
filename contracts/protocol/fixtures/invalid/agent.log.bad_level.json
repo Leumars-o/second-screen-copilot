@@ -1,0 +1,8 @@
+{
+  "v": 1,
+  "type": "agent.log",
+  "seq": 5,
+  "ts": 1763290000123,
+  "session_id": null,
+  "payload": { "entries": [ { "t": 1, "level": "debug", "source": "x", "text": "y" } ] }
+}

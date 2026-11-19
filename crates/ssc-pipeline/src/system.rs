@@ -162,7 +162,7 @@ pub async fn build(cfg: Config, secrets: Arc<dyn SecretStore>, progress: Progres
     let screen: Option<Arc<dyn ScreenSource>> = match ssc_screen::platform_reader() {
         Ok(r) => Some(Arc::new(r)),
         Err(e) => {
-            eprintln!("[ssc-pipeline] screen reader unavailable: {e}");
+            ssc_core::logbus::warn("ssc-pipeline", format!("screen reader unavailable: {e}"));
             None
         }
     };

@@ -10,6 +10,7 @@
     { "type": "object", "additionalProperties": false, "required": ["action", "answer_id"], "properties": { "action": { "const": "number" }, "answer_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" } } },
     { "type": "object", "additionalProperties": false, "required": ["action", "answer_id"], "properties": { "action": { "const": "expand_all" }, "answer_id": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$" } } },
     { "type": "object", "additionalProperties": false, "required": ["action"], "description": "CR-21: read the PC's focused window now and answer it (the screen hotkey, from the phone).", "properties": { "action": { "const": "screen" } } },
+    { "type": "object", "additionalProperties": false, "required": ["action"], "description": "CR-23: send agent.status and the agent.log backlog now (phone connected or opened Logs).", "properties": { "action": { "const": "agent.sync" } } },
     {
       "type": "object", "additionalProperties": false,
       "required": ["action", "text"],

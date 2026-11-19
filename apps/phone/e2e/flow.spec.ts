@@ -93,9 +93,12 @@ test("pair -> stream -> expand -> pin -> summary", async ({ request }) => {
     await expect
       .poll(async () => (await mock.commands(request)).find((c) => c.item?.kind === "rating"))
       .toEqual({ action: "feedback", answer_id: answerId, item: { kind: "rating", value: "up" } });
-    // Every command carries the active session id.
+    // Every answer command carries the active session id (agent.sync is session-independent:
+    // it goes out on connect, before any session).
     const sessionId = (await (await request.get("/__mock/state")).json()).sessionId;
-    expect((await mock.received(request)).filter((e) => e.type === "command").every((e) => e.session_id === sessionId)).toBe(true);
+    const answerCommands = (await mock.received(request)).filter((e) => e.type === "command" && e.payload.action !== "agent.sync");
+    expect(answerCommands.length).toBeGreaterThan(0);
+    expect(answerCommands.every((e) => e.session_id === sessionId)).toBe(true);
 
     await page.getByTestId("followup-input").fill("What about SSO?");
     await page.getByTestId("followup-send").click();
@@ -278,4 +281,39 @@ test("CR-21: 'Read PC screen' sends the screen command and waits for the answer"
   await expect(page.getByTestId("answer-current").getByTestId("stream-cue")).toHaveText("Nairobi.\n");
   await expect(btn).toHaveText("Read PC screen");
   await expect(btn).toBeEnabled();
+});
+
+test("CR-23: health line on the main screen, PC errors surface, Logs tab shows checks and lines", async ({ request }) => {
+  await page.getByTestId("tab-live").click();
+  // The phone asked for agent.sync on connect: the mock's "all good" status is shown.
+  await expect.poll(async () => (await mock.commands(request)).some((c) => c.action === "agent.sync")).toBe(true);
+  const line = page.getByTestId("health-line");
+  await expect(line).toHaveAttribute("data-level", "ok");
+  await expect(line).toContainText("All good");
+
+  // The PC reports a problem and logs it.
+  await mock.post(request, "status", {
+    health: "error",
+    summary: "Last screen read: no focused application · 5 s ago",
+    checks: [
+      { id: "agent", label: "Agent", state: "ok", detail: "running" },
+      { id: "last_screen", label: "Last screen read", state: "error", detail: "no focused application · 5 s ago" },
+    ],
+  });
+  await mock.post(request, "log", {
+    entries: [{ t: Date.now(), level: "error", source: "ssc-pipeline", text: "screen hotkey: could not read the focused window" }],
+  });
+  await expect(line).toHaveAttribute("data-level", "error");
+  await expect(line).toContainText("no focused application");
+  await expect(page.getByTestId("tab-logs")).toHaveText("Logs •");
+
+  await page.getByTestId("tab-logs").click();
+  await expect(page.getByTestId("health-checks").locator("li")).toHaveCount(2);
+  await expect(page.getByTestId("health-checks").locator('li[data-state="error"]')).toContainText("Last screen read");
+  const lines = page.getByTestId("log-lines").locator("li");
+  await expect(lines.first()).toContainText("could not read the focused window"); // newest first
+  await expect(lines).toHaveCount(2); // + "agent started" from the sync backlog, not duplicated
+  await page.getByRole("button", { name: "Problems" }).click();
+  await expect(lines).toHaveCount(1);
+  await page.getByTestId("tab-live").click();
 });

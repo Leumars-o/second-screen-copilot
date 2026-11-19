@@ -1,0 +1,18 @@
+{
+  "v": 1,
+  "type": "agent.status",
+  "seq": 4,
+  "ts": 1763290000123,
+  "session_id": null,
+  "payload": {
+    "health": "error",
+    "summary": "Last screen read: no focused application · 5 s ago",
+    "checks": [
+      { "id": "agent", "label": "Agent", "state": "ok", "detail": "running" },
+      { "id": "capture", "label": "Capture", "state": "off", "detail": "stopped" },
+      { "id": "last_screen", "label": "Last screen read", "state": "error", "detail": "no focused application · 5 s ago" }
+    ],
+    "capturing": false,
+    "t": 1763290000100
+  }
+}

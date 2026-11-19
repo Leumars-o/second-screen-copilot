@@ -7,10 +7,11 @@ import { browserVibrate } from "../lib/vibrate";
 import { AnswerCard } from "./AnswerCard";
 import { FollowUp } from "./FollowUp";
 import { MemoryScreen } from "./MemoryScreen";
+import { HealthLine, LogsScreen, healthLine, useNow } from "./LogsScreen";
 import { PairScreen } from "./PairScreen";
 import { ContactsScreen, SummaryScreen } from "./SummaryScreen";
 
-type Screen = "live" | "summary" | "memory" | "contacts";
+type Screen = "live" | "summary" | "memory" | "contacts" | "logs";
 
 const ATTEMPTS_KEPT = 8;
 
@@ -96,6 +97,7 @@ export function App() {
   const [paired, setPaired] = useState(false);
   const [pairError, setPairError] = useState<string | null>(null);
   const [attempts, setAttempts] = useState<LinkAttempt[]>([]);
+  const now = useNow(); // before any early return: hook order must not change
   /** "Read screen" pressed: the id of the answer on top at that moment (until a new one lands). */
   const [reading, setReading] = useState<string | null | undefined>(undefined);
   const [screen, setScreen] = useState<Screen>("live");
@@ -132,8 +134,17 @@ export function App() {
     if (!stored) return;
     setAttempts([]);
     const h = connect(stored, copilot, {
-      onStatus: setStatus,
-      onPaired: () => setPaired(true),
+      onStatus: (s) => {
+        setStatus(s);
+        // CR-23: fresh status + log backlog on every (re)connect. Only once the PC knows this
+        // phone: "connected" fires before the pair.hello goes out, and a sealed frame ahead of
+        // the hello is garbage to the PC. A new pairing syncs from onPaired instead.
+        if (s.state === "connected" && stored.confirmed) void copilot.syncAgent();
+      },
+      onPaired: () => {
+        setPaired(true);
+        void copilot.syncAgent();
+      },
       onAttempt: (a) => setAttempts((prev) => [...prev, a].slice(-ATTEMPTS_KEPT)),
     });
     linkRef.current = h;
@@ -197,6 +208,7 @@ export function App() {
   }
 
   const online = status?.state === "connected" && paired;
+  const health = healthLine(online, state.agentStatus, state.agentStatusAt, now);
   const [current, ...older] = state.answers;
   const waitingForScreen = reading !== undefined && (current?.id ?? null) === reading;
   const readScreen = () => {
@@ -212,6 +224,7 @@ export function App() {
   return (
     <main className="app">
       <StatusLine status={status} paired={paired} onUnpair={unpair} urls={stored.pairing.urls} attempts={attempts} />
+      <HealthLine view={health} />
 
       {screen === "live" && (
         <section className="screen live" data-testid="live-screen">
@@ -266,6 +279,9 @@ export function App() {
       {screen === "summary" && <SummaryScreen copilot={copilot} summaries={state.summaries} confirmed={state.confirmedContacts} />}
       {screen === "memory" && <MemoryScreen copilot={copilot} items={state.memory} online={online} />}
       {screen === "contacts" && <ContactsScreen copilot={copilot} summaries={state.summaries} confirmed={state.confirmedContacts} />}
+      {screen === "logs" && (
+        <LogsScreen status={state.agentStatus} statusAt={state.agentStatusAt} logs={state.logs} onRefresh={() => void copilot.syncAgent()} />
+      )}
 
       <nav className="tabs" aria-label="Screens">
         {(
@@ -274,9 +290,19 @@ export function App() {
             ["summary", "Summary"],
             ["memory", "Memory"],
             ["contacts", pendingContacts ? `Contacts ${pendingContacts}` : "Contacts"],
+            ["logs", state.agentStatus && state.agentStatus.health !== "ok" ? "Logs •" : "Logs"],
           ] as const
         ).map(([id, label]) => (
-          <button key={id} type="button" aria-current={screen === id ? "page" : undefined} onClick={() => setScreen(id)} data-testid={`tab-${id}`}>
+          <button
+            key={id}
+            type="button"
+            aria-current={screen === id ? "page" : undefined}
+            onClick={() => {
+              setScreen(id);
+              if (id === "logs") void copilot.syncAgent();
+            }}
+            data-testid={`tab-${id}`}
+          >
             {label}
           </button>
         ))}

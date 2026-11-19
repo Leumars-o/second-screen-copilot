@@ -11,9 +11,16 @@ const LINK_KEY = "ssc.link.v1";
  * (README: "persist a reservation and jump to it"); gaps are fine, going backwards is not. */
 export const SEQ_RESERVATION = 1000;
 
-/** Saved link state as restored on startup: next-send seq jumps past anything possibly sent. */
-export function restoreLinkState(saved: StoredLink | null) {
+/** Which pairing (its `room_id`) may read and write the link state. Re-pairing switches it at
+ * once, so a link still winding down for the old pairing can neither restore nor overwrite the
+ * new pairing's seq state (its stale counters made the new PC's frames look like replays). */
+const ACTIVE_ROOM_KEY = "ssc.link.room.v1";
+
+/** Saved link state as restored on startup: next-send seq jumps past anything possibly sent.
+ * State saved by a different pairing is ignored (`room` given and both tagged, and different). */
+export function restoreLinkState(saved: StoredLink | null, room?: string) {
   if (!saved) return null;
+  if (room && saved.room && saved.room !== room) return null;
   return { ...saved, state: { ...saved.state, nextSendSeq: saved.state.nextSendSeq + SEQ_RESERVATION } };
 }
 
@@ -25,6 +32,9 @@ export interface StoredPairing {
   confirmed: boolean;
 }
 interface StoredLink {
+  /** The pairing this state belongs to (`Pairing.room_id`). Absent in state saved before the fix:
+   * accepted, since dropping it would restart seq at 0 and the PC would reject the phone. */
+  room?: string;
   state: ChannelState;
   sessionId: string | null;
   /** Written synchronously when the PC confirms pairing, so a reload never re-sends the hello
@@ -70,6 +80,7 @@ export async function loadPairing(): Promise<StoredPairing | null> {
 
 export async function forgetPairing(): Promise<void> {
   localStorage.removeItem(LINK_KEY);
+  localStorage.removeItem(ACTIVE_ROOM_KEY);
   await deleteSealedPairing().catch(() => undefined);
 }
 
@@ -103,6 +114,7 @@ export async function pairFromQr(qrText: string, deviceName: string): Promise<St
   const start = await startPairing(qr, deviceName);
   const stored: StoredPairing = { pairing: start.pairing, hello: start.hello, confirmed: false };
   localStorage.removeItem(LINK_KEY); // fresh keys -> fresh seq space
+  localStorage.setItem(ACTIVE_ROOM_KEY, start.pairing.room_id); // the old link may no longer write
   await saveSealedPairing(stored).catch(() => undefined);
   return stored;
 }
@@ -129,13 +141,19 @@ export function connect(
   hooks: { onStatus: (s: LinkStatus) => void; onPaired: () => void; onAttempt?: (a: LinkAttempt) => void },
   ws: (url: string) => WsLike = (url) => new WebSocket(url) as unknown as WsLike,
 ): LinkHandle {
-  const prev = restoreLinkState(read<StoredLink>(LINK_KEY));
+  const room = stored.pairing.room_id;
+  if (localStorage.getItem(ACTIVE_ROOM_KEY) === null) localStorage.setItem(ACTIVE_ROOM_KEY, room); // upgrade
+  const ours = () => localStorage.getItem(ACTIVE_ROOM_KEY) === room;
+  const save = (v: StoredLink) => {
+    if (ours()) write(LINK_KEY, v);
+  };
+  const prev = ours() ? restoreLinkState(read<StoredLink>(LINK_KEY), room) : null;
   let pending: StoredLink | null = null;
   let flushScheduled = false;
   // Persist at most once per macrotask: deltas arrive in bursts.
   const flush = () => {
     flushScheduled = false;
-    if (pending) write(LINK_KEY, pending);
+    if (pending) save(pending);
   };
   const link = new PhoneLink({
     pairing: stored.pairing,
@@ -154,10 +172,10 @@ export function connect(
     onStatus: hooks.onStatus,
     ...(hooks.onAttempt ? { onAttempt: hooks.onAttempt } : {}),
     onPersist: ({ state, sessionId, helloConfirmed }) => {
-      pending = { state, sessionId, helloConfirmed };
+      pending = { room, state, sessionId, helloConfirmed };
       if (helloConfirmed && stored.hello) {
         delete stored.hello;
-        write(LINK_KEY, pending); // confirmed: the hello is no longer needed; persist now, not later
+        save(pending); // confirmed: the hello is no longer needed; persist now, not later
         savePairing(stored);
       }
       if (!flushScheduled) {

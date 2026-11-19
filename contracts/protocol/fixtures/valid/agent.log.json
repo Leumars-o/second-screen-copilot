@@ -1,0 +1,13 @@
+{
+  "v": 1,
+  "type": "agent.log",
+  "seq": 5,
+  "ts": 1763290000123,
+  "session_id": null,
+  "payload": {
+    "entries": [
+      { "t": 1763290000001, "level": "info", "source": "ssc-agent", "text": "agent started (Cloud mode)" },
+      { "t": 1763290000100, "level": "error", "source": "ssc-pipeline", "text": "screen hotkey: could not read the focused window" }
+    ]
+  }
+}

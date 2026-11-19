@@ -15,6 +15,8 @@ import {
   toB64,
   verifyPairHello,
   type AnyEnvelope,
+  type AgentLog,
+  type AgentStatus,
   type AnswerEnd,
   type AnswerStart,
   type Command,
@@ -196,8 +198,31 @@ export class MockPc {
     }
   }
 
+  /** CR-23: what the mock PC reports (set with /__mock/status, /__mock/log). */
+  agentStatus: AgentStatus = {
+    health: "ok",
+    summary: "All good · capture off · cloud",
+    checks: [{ id: "agent", label: "Agent", state: "ok", detail: "running" }],
+    capturing: false,
+    t: Date.now(),
+  };
+  agentLogs: AgentLog["entries"] = [{ t: Date.now(), level: "info", source: "ssc-agent", text: "agent started (Cloud mode)" }];
+
+  async sendStatus(s?: Partial<AgentStatus>): Promise<void> {
+    if (s) this.agentStatus = { ...this.agentStatus, ...s };
+    await this.send({ type: "agent.status", payload: { ...this.agentStatus, t: Date.now() } });
+  }
+
+  async sendLog(entries: AgentLog["entries"]): Promise<void> {
+    this.agentLogs.push(...entries);
+    await this.send({ type: "agent.log", payload: { entries } });
+  }
+
   private async onCommand(c: Command): Promise<unknown> {
     switch (c.action) {
+      case "agent.sync":
+        await this.sendStatus();
+        return this.send({ type: "agent.log", payload: { entries: this.agentLogs.slice(-200) } });
       case "memory.list":
         return this.sendSnapshot();
       case "memory.update": {
@@ -328,6 +353,10 @@ export class MockPc {
             return json({ answer_id: await this.streamAnswer(body as StreamAnswerOptions) });
           case "/__mock/transcript":
             return json(await this.transcript(String(body.text ?? "How long does onboarding take?")));
+          case "/__mock/status":
+            return json(await this.sendStatus(body as Partial<AgentStatus>));
+          case "/__mock/log":
+            return json(await this.sendLog((body.entries ?? []) as AgentLog["entries"]));
           case "/__mock/drop":
             this.socket?.terminate();
             return json({ ok: true });

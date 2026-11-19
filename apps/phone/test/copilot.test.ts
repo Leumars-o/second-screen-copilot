@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { AnyEnvelope, Command, Outgoing } from "@ssc/protocol";
+import type { AgentStatus, AnyEnvelope, Command, Outgoing } from "@ssc/protocol";
 import { isValidEnvelope } from "@ssc/protocol";
-import { Copilot } from "../src/lib/copilot";
+import { Copilot, MAX_LOGS } from "../src/lib/copilot";
+import { STATUS_STALE_MS, healthLine } from "../src/ui/LogsScreen";
 import { VIBRATION } from "../src/lib/vibrate";
 
 const AID = "a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d";
@@ -116,5 +117,42 @@ describe("Copilot", () => {
     expect(c.getState().summaries.map((s) => s.summary)).toEqual(["s2"]);
     c.handle(env("memory.snapshot", { items: [] }));
     expect(c.getState().memory).toEqual([]);
+  });
+});
+
+describe("CR-23 agent status and logs", () => {
+  const mk = () => new Copilot({ send: () => true, afterPaint: (cb) => cb() });
+  const env = (type: string, payload: unknown) => ({ v: 1, type, seq: 1, ts: 0, session_id: null, payload }) as never;
+
+  it("keeps each log line once across live lines and the sync backlog, oldest first, capped", () => {
+    const c = mk();
+    const a = { t: 2, level: "error", source: "ssc-pipeline", text: "screen hotkey: could not read" } as const;
+    const b = { t: 1, level: "info", source: "ssc-agent", text: "agent started" } as const;
+    c.handle(env("agent.log", { entries: [a] }));
+    c.handle(env("agent.log", { entries: [b, a] })); // backlog overlaps
+    expect(c.getState().logs.map((e) => e.t)).toEqual([1, 2]);
+    c.handle(env("agent.log", { entries: Array.from({ length: MAX_LOGS + 10 }, (_, i) => ({ t: 10 + i, level: "info", source: "x", text: `l${i}` })) }));
+    expect(c.getState().logs).toHaveLength(MAX_LOGS);
+    expect(c.getState().logs.at(-1)!.text).toBe(`l${MAX_LOGS + 9}`);
+  });
+
+  it("stores the status with its arrival time", () => {
+    const c = mk();
+    const s = { health: "warn", summary: "Answer models: Groq only", checks: [], capturing: false, t: 5 };
+    c.handle(env("agent.status", s));
+    expect(c.getState().agentStatus).toEqual(s);
+    expect(c.getState().agentStatusAt).toBeGreaterThan(0);
+  });
+});
+
+describe("CR-23 health line", () => {
+  const ok: AgentStatus = { health: "ok", summary: "All good · capture off · cloud", checks: [], capturing: false, t: 0 };
+  it("says when the link is down, when status is missing, stale, or reports the PC's summary", () => {
+    expect(healthLine(false, ok, 0, 0)).toEqual({ level: "off", text: "Not connected to the PC" });
+    expect(healthLine(true, null, null, 0).level).toBe("warn");
+    expect(healthLine(true, ok, 1000, 1000 + 50_000)).toEqual({ level: "error", text: "No word from the PC for 50 s: agent stopped or busy?" });
+    expect(healthLine(true, ok, 1000, 1000 + STATUS_STALE_MS).level).toBe("ok"); // not yet stale
+    expect(healthLine(true, ok, 1000, 2000)).toEqual({ level: "ok", text: "All good · capture off · cloud" });
+    expect(healthLine(true, { ...ok, health: "error", summary: "Screen Recording: missing" }, 0, 10).level).toBe("error");
   });
 });

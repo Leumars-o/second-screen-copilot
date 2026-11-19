@@ -4,6 +4,7 @@
 
 mod app;
 mod cli;
+mod health;
 mod permissions;
 mod settings;
 mod slot;

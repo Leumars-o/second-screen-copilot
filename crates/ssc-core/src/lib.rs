@@ -11,6 +11,7 @@
 pub mod config;
 pub mod decision;
 pub mod error;
+pub mod logbus;
 pub mod mock;
 pub mod protocol;
 pub mod secrets;

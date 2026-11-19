@@ -120,3 +120,22 @@ h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 }
 .tabs button { background: none; border: none; font-size: 15px; color: var(--muted); white-space: nowrap; padding: 8px 2px; }
 .tabs button[aria-current="page"] { color: var(--accent); font-weight: 600; }
+
+/* CR-23: health line + Logs tab */
+.health { display: flex; gap: 8px; align-items: baseline; margin: 0 0 10px; font-size: 14px; line-height: 1.35; }
+.health-icon { flex: none; width: 1em; text-align: center; }
+.health-ok .health-icon, .check-ok .health-icon { color: #3fb950; }
+.health-warn, .check-warn .health-icon { color: #e3b341; }
+.health-error, .check-error .health-icon { color: #f85149; }
+.health-off, .check-off .health-icon { color: var(--muted); }
+.health-ok { color: var(--muted); }
+.logs-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.checks { list-style: none; padding: 0; margin: 8px 0 16px; display: grid; gap: 6px; font-size: 15px; }
+.checks li { display: flex; gap: 8px; flex-wrap: wrap; }
+.seg { display: flex; gap: 4px; }
+.seg button[aria-pressed="true"] { outline: 1px solid var(--muted); }
+.log { list-style: none; padding: 0; margin: 8px 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12.5px; line-height: 1.45; overflow-wrap: anywhere; }
+.log li { padding: 3px 0; border-bottom: 1px solid #1e252d; }
+.log-t, .log-src { color: var(--muted); }
+.log-warn { color: #e3b341; }
+.log-error { color: #f85149; }

@@ -1,0 +1,14 @@
+{
+  "v": 1,
+  "type": "agent.status",
+  "seq": 4,
+  "ts": 1763290000123,
+  "session_id": null,
+  "payload": {
+    "health": "ok",
+    "summary": "All good",
+    "checks": [ { "id": "Has Spaces", "label": "x", "state": "ok", "detail": "" } ],
+    "capturing": false,
+    "t": 1
+  }
+}
