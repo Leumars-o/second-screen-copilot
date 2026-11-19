@@ -1,5 +1,5 @@
 "use client";
-import { useLayoutEffect, useRef } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import type { Answer, Copilot } from "../lib/copilot";
 
 /** Streamed text, appended imperatively (one text node per delta). React never re-renders it. */
@@ -26,6 +26,16 @@ function StreamBody({ copilot, answer, showCue }: { copilot: Copilot; answer: An
   );
 }
 
+/** CR-23b: what the model was given. Tap to enlarge; tap again to shrink. */
+function ScreenThumb({ src }: { src: string }) {
+  const [big, setBig] = useState(false);
+  return (
+    <button type="button" className={`thumb${big ? " thumb-big" : ""}`} onClick={() => setBig(!big)} aria-label={big ? "Shrink screenshot" : "Show the screenshot the answer used"} data-testid="screen-thumb">
+      <img src={src} alt="What the PC captured" />
+    </button>
+  );
+}
+
 const FORMAT_LABEL = { cue: "Cues", fact: "Fact", objection: "Objection", screen: "Screen" } as const;
 
 export function AnswerCard({ copilot, answer, current }: { copilot: Copilot; answer: Answer; current: boolean }) {
@@ -45,6 +55,8 @@ export function AnswerCard({ copilot, answer, current }: { copilot: Copilot; ans
         {answer.pinned && <span className="chip chip-pin">Pinned</span>}
         {!end && <span className="live-dot" aria-label="streaming" />}
       </header>
+
+      {answer.start.thumb && <ScreenThumb src={answer.start.thumb} />}
 
       {end?.not_in_docs && (
         <p className="not-in-docs" data-testid="not-in-docs">

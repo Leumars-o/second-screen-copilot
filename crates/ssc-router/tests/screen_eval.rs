@@ -1,4 +1,4 @@
-//! CR-20 eval: the screen prompt (`screen.v3.md`) + a screenshot → each vision model.
+//! CR-20 eval: the screen prompt (`screen.v4.md`) + a screenshot → each vision model.
 //! Eight synthetic screens with one known answer each (`fixtures/screens`, regenerate with
 //! `gen.swift`). Graded deterministically on the answer line (text before `---`).
 //! Live (real network, keychain keys), never run by the gate:
@@ -60,7 +60,7 @@ const META: &[&str] = &[
 ];
 
 fn prompt(label: &str, window: &str, jpeg: Vec<u8>) -> Prompt {
-    let t = include_str!("../../../contracts/prompts/screen.v3.md");
+    let t = include_str!("../../../contracts/prompts/screen.v4.md");
     let (prefix, dynamic) = t.split_once("<<<DYNAMIC>>>").unwrap();
     Prompt {
         prefix: prefix

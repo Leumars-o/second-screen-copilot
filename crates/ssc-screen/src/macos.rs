@@ -242,20 +242,14 @@ pub fn front_window() -> Option<(String, String, Rect)> {
     }
     // SAFETY: Copy rule, +1; elements are CFDictionaryRef.
     let list: CFArray<CFDictionary<CFString, CFType>> = unsafe { CFArray::wrap_under_create_rule(raw) };
-    let me = std::process::id() as i64;
     let num = |d: &CFDictionary<CFString, CFType>, k: &str| -> Option<f64> {
         d.find(CFString::new(k)).and_then(|v| v.downcast::<CFNumber>()).and_then(|n| n.to_f64())
     };
     let text = |d: &CFDictionary<CFString, CFType>, k: &str| -> String {
         d.find(CFString::new(k)).and_then(|v| v.downcast::<CFString>()).map(|s| s.to_string()).unwrap_or_default()
     };
+    let mut wins = Vec::new();
     for w in list.iter() {
-        if num(&w, "kCGWindowLayer") != Some(0.0) || num(&w, "kCGWindowOwnerPID").map(|p| p as i64) == Some(me) {
-            continue;
-        }
-        if num(&w, "kCGWindowAlpha").is_some_and(|a| a <= 0.0) {
-            continue;
-        }
         let Some(b) = w.find(CFString::new("kCGWindowBounds")).and_then(|v| v.downcast::<CFDictionary>()) else {
             continue;
         };
@@ -266,13 +260,16 @@ pub fn front_window() -> Option<(String, String, Rect)> {
         else {
             continue;
         };
-        if width < 100.0 || height < 60.0 {
-            continue;
-        }
-        let rect = Rect { x: x as i32, y: y as i32, w: width.ceil() as i32, h: height.ceil() as i32 };
-        return Some((text(&w, "kCGWindowOwnerName"), text(&w, "kCGWindowName"), rect));
+        wins.push(crate::grab::WinInfo {
+            app: text(&w, "kCGWindowOwnerName"),
+            title: text(&w, "kCGWindowName"),
+            pid: num(&w, "kCGWindowOwnerPID").map_or(-1, |p| p as i64),
+            layer: num(&w, "kCGWindowLayer").map_or(-1, |l| l as i64),
+            alpha: num(&w, "kCGWindowAlpha").unwrap_or(1.0),
+            rect: Rect { x: x as i32, y: y as i32, w: width.ceil() as i32, h: height.ceil() as i32 },
+        });
     }
-    None
+    crate::grab::pick_front_window(&wins, std::process::id() as i64)
 }
 
 impl Default for AxReader {

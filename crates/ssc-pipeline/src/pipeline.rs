@@ -155,6 +155,8 @@ struct AnswerMeta {
     intent: Intent,
     profile: String,
     cues: Vec<Cue>,
+    /// The answer as shown (screen answers only; follow-ups quote it, CR-23b G).
+    text: String,
 }
 
 #[derive(Debug, Clone)]
@@ -178,6 +180,8 @@ struct Job {
     screen: Option<Arc<ScreenGrab>>,
     /// Extra instruction appended to the dynamic prompt (screen "shorter" / "number").
     note: Option<&'static str>,
+    /// Screen follow-ups: the earlier answer about the same screenshot (the `{{answer}}` slot).
+    prev_answer: Option<String>,
 }
 
 impl Job {
@@ -197,6 +201,7 @@ impl Job {
             expand: None,
             screen: None,
             note: None,
+            prev_answer: None,
         }
     }
 
@@ -217,6 +222,7 @@ impl Job {
             tag: false,
             screen: Some(grab),
             note: None,
+            prev_answer: None,
         }
     }
 }
@@ -514,36 +520,29 @@ impl Pipeline {
         // Local-only mode sends nothing off the PC: text (with OCR) only.
         let image = inner.settings.config.mode != Mode::Local;
         tokio::spawn(async move {
+            let t0 = inner.parts.clock.now_ms();
             let grab = match blocking(move || screen.grab(image)).await {
                 Ok(g) => g,
-                Err(e) => {
-                    log(format!("screen hotkey: could not read the focused window: {e}"));
-                    let now = inner.parts.clock.now_ms();
-                    set_health(&inner, |h| h.last_grab = Some((now, CheckState::Error, e.to_string())));
-                    let empty = ScreenGrab {
-                        app: String::new(),
-                        window_title: String::new(),
-                        text: String::new(),
-                        text_source: ssc_core::types::ScreenTextSource::Accessibility,
-                        image: None,
-                        image_size: None,
-                        image_error: None,
-                    };
-                    let job = Job::screen(id, Trigger::Hotkey, profile, Arc::new(empty));
-                    let sid = inner.live.lock().unwrap().session_id;
-                    finish(&inner, &job, sid, error_end(id), String::new()).await;
-                    return;
-                }
+                Err(e) => return capture_failed(&inner, id, &profile, e.to_string()).await,
             };
-            if let Some(e) = &grab.image_error {
-                log(format!("screen hotkey: no image ({e}); answering from the window text"));
+            let ms = inner.parts.clock.now_ms().saturating_sub(t0);
+            // CR-23b: what was captured, so a wrong window shows up in the log (metadata only).
+            let size = |s: Option<(i32, i32)>| s.map_or("?".into(), |(w, h)| format!("{w}x{h}"));
+            log(format!(
+                "screen read: captured {} window {} pt -> image {} ({} KB), {} chars of window text, {ms} ms",
+                if grab.app.is_empty() { "unknown" } else { &grab.app },
+                size(grab.window_size),
+                grab.image_size.map_or("none".into(), |(w, h)| format!("{w}x{h}")),
+                grab.image.as_ref().map_or(0, |i| i.data.len() / 1024),
+                grab.text.chars().count(),
+            ));
+            // E: in cloud mode the image IS the input; answering from text alone guesses.
+            if image && grab.image.is_none() {
+                let why = grab.image_error.clone().unwrap_or_else(|| "no image".into());
+                return capture_failed(&inner, id, &profile, why).await;
             }
             let now = inner.parts.clock.now_ms();
-            let (state, detail) = match (&grab.image_error, image) {
-                (Some(e), true) => (CheckState::Warn, format!("{} (no image: {e})", grab.label())),
-                _ => (CheckState::Ok, grab.label()),
-            };
-            set_health(&inner, |h| h.last_grab = Some((now, state, detail)));
+            set_health(&inner, |h| h.last_grab = Some((now, CheckState::Ok, grab.label())));
             let grab = Arc::new(grab);
             remember_grab(&inner, id, grab.clone());
             run_answer(inner, Job::screen(id, Trigger::Hotkey, profile, grab), cancel, None).await;
@@ -920,7 +919,8 @@ struct Push {
     started: bool,
     first_sent: bool,
     detail_text: String,
-    /// Everything streamed (both blocks), for the debug log only.
+    /// Everything streamed (both blocks): kept with the answer for screen follow-ups, and the
+    /// debug dump.
     all_text: String,
 }
 
@@ -944,6 +944,10 @@ async fn ensure_start(
         intent: job.intent,
         urgency: job.urgency,
         model: limits::clip(&model, 128),
+        thumb: job.screen.as_ref().and_then(|g| g.thumb.as_ref()).map(|t| {
+            use base64::Engine;
+            format!("data:image/jpeg;base64,{}", base64::engine::general_purpose::STANDARD.encode(t))
+        }),
     };
     send(inner, sid, Message::AnswerStart(start)).await;
 }
@@ -962,12 +966,11 @@ async fn push_delta(
         }
         p.detail_text.push_str(&d.text);
     }
-    if debug_answers_on() {
-        if d.block == Block::Detail && !p.all_text.contains("\n---\n") {
-            p.all_text.push_str("---\n");
-        }
-        p.all_text.push_str(&d.text);
+    // The answer as shown (both blocks): for screen follow-ups (G) and the debug dump.
+    if d.block == Block::Detail && !p.all_text.contains("\n---\n") {
+        p.all_text.push_str("\n---\n");
     }
+    p.all_text.push_str(&d.text);
     ensure_start(inner, job, sid, model, p).await;
     for text in limits::split_chars(&d.text, 4096) {
         send(inner, sid, Message::AnswerDelta(AnswerDelta { answer_id: job.answer_id, block: d.block, text })).await;
@@ -1031,11 +1034,11 @@ async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken, gate
         screen,
         question: job.question.clone(),
         now_ms: inner.parts.clock.now_ms(),
-        answer: job
-            .expand
-            .as_ref()
-            .map(|c| numbered_cues(&c.iter().map(|c| c.text.clone()).collect::<Vec<_>>()))
-            .unwrap_or_default(),
+        answer: match (&job.expand, &job.prev_answer) {
+            (Some(c), _) => numbered_cues(&c.iter().map(|c| c.text.clone()).collect::<Vec<_>>()),
+            (None, Some(prev)) => prev.clone(),
+            (None, None) => String::new(),
+        },
         ..Default::default()
     };
     let assembled = blocking(move || {
@@ -1203,6 +1206,11 @@ async fn run_answer(inner: Arc<Inner>, job: Job, cancel: CancellationToken, gate
         print_debug_answer(&job, &model, &prefix, &dynamic, &images, &p.all_text);
     }
     finish(&inner, &job, sid, end, model).await;
+    if job.format == AnswerFormat::Screen
+        && let Some((_, m)) = inner.answers.lock().unwrap().get_mut(&id)
+    {
+        m.text = limits::clip(p.all_text.trim(), 2000);
+    }
 }
 
 /// `SSC_DEBUG_ANSWERS=1`: each answer's prompt text (images as size only), model and raw output
@@ -1265,6 +1273,7 @@ async fn finish(inner: &Arc<Inner>, job: &Job, sid: Option<Uuid>, end: AnswerEnd
             intent: job.intent,
             profile: job.profile.clone(),
             cues: end.cues.clone(),
+            text: String::new(),
         },
     );
     {
@@ -1440,7 +1449,34 @@ fn command_job(inner: &Inner, m: Option<&AnswerMeta>, question: String) -> Job {
         tag: false,
         screen: None,
         note: None,
+        prev_answer: None,
     }
+}
+
+/// E (CR-23b): the screen could not be captured. A card that says so (instead of an answer
+/// guessed from the window text), an error in the health line, and a log line.
+async fn capture_failed(inner: &Arc<Inner>, id: Uuid, profile: &str, why: String) {
+    log(format!("screen read: could not capture the screen: {why}"));
+    let now = inner.parts.clock.now_ms();
+    set_health(inner, |h| h.last_grab = Some((now, CheckState::Error, why.clone())));
+    let empty = ScreenGrab::from_snapshot(
+        ScreenSnapshot {
+            app: String::new(),
+            window_title: String::new(),
+            nodes: vec![],
+            source: ssc_core::types::ScreenTextSource::Accessibility,
+            captured_at_ms: now,
+        },
+        Some(why.clone()),
+    );
+    let job = Job::screen(id, Trigger::Hotkey, profile.to_string(), Arc::new(empty));
+    let sid = inner.live.lock().unwrap().session_id;
+    let (_mtx, mrx) = watch::channel::<Option<String>>(Some("none".into()));
+    let mut p = Push { started: false, first_sent: false, detail_text: String::new(), all_text: String::new() };
+    ensure_start(inner, &job, sid, &mrx, &mut p).await;
+    let text = limits::clip(&format!("Couldn't capture the screen: {why}"), 2000);
+    send(inner, sid, Message::AnswerDelta(AnswerDelta { answer_id: id, block: Block::Cue, text })).await;
+    finish(inner, &job, sid, error_end(id), "none".into()).await;
 }
 
 fn current_profile(inner: &Inner) -> String {
@@ -1532,6 +1568,28 @@ async fn handle_command(inner: Arc<Inner>, c: Command) {
             expand: Some(m.cues.clone()),
             ..command_job(&inner, Some(&m), m.question.clone())
         }),
+        // G (CR-23b): a follow-up on a screen card is about that screenshot: same grab, the
+        // user's question, and the earlier answer, through the screen prompt.
+        Command::Followup { answer_id: Some(of), text }
+            if meta(&inner, of).is_some_and(|m| m.format == AnswerFormat::Screen)
+                && remembered_grab(&inner, of).is_some() =>
+        {
+            let m = meta(&inner, of).expect("checked");
+            let grab = remembered_grab(&inner, of).expect("checked");
+            let id = Uuid::new_v4();
+            remember_grab(&inner, id, grab.clone());
+            let label = grab.label();
+            let question = if label.is_empty() {
+                format!("The user asks: {text}")
+            } else {
+                format!("{label}\nThe user asks: {text}")
+            };
+            Some(Job {
+                question,
+                prev_answer: (!m.text.is_empty()).then(|| m.text.clone()),
+                ..Job::screen(id, Trigger::Command, m.profile.clone(), grab)
+            })
+        }
         Command::Followup { answer_id, text } => {
             let m = answer_id.and_then(|id| meta(&inner, id));
             let mut j = command_job(&inner, None, text);

@@ -49,7 +49,7 @@ pub const NOT_A_GRAB_TARGET: &[&str] = &[
     "Second Screen Copilot",
 ];
 
-fn is_grab_target(app: &str) -> bool {
+pub(crate) fn is_grab_target(app: &str) -> bool {
     !NOT_A_GRAB_TARGET.iter().any(|n| n.eq_ignore_ascii_case(app.trim()))
 }
 
@@ -175,7 +175,6 @@ impl ScreenReader {
             match (&self.color, bounds) {
                 (Some(c), Some(b)) => match c.capture_color(b, crate::grab::GRAB_MAX_EDGE) {
                     Ok(frame) => {
-                        let jpeg = crate::grab::encode_jpeg(&frame, crate::grab::JPEG_QUALITY)?;
                         let snap = ScreenSnapshot {
                             app: read.app,
                             window_title: read.window_title,
@@ -183,7 +182,7 @@ impl ScreenReader {
                             source: ScreenTextSource::Accessibility,
                             captured_at_ms: self.clock.now_ms(),
                         };
-                        return Ok(crate::grab::make_grab(snap, Some((frame.width, frame.height, jpeg)), None));
+                        return crate::grab::grab_from_frame(snap, &frame, b);
                     }
                     Err(e) => capture_error = Some(e.to_string()),
                 },
@@ -228,10 +227,7 @@ impl ScreenReader {
             captured_at_ms: self.clock.now_ms(),
         };
         match frame {
-            Ok(f) => {
-                let jpeg = crate::grab::encode_jpeg(&f, crate::grab::JPEG_QUALITY)?;
-                Ok(crate::grab::make_grab(snap, Some((f.width, f.height, jpeg)), None))
-            }
+            Ok(f) => crate::grab::grab_from_frame(snap, &f, b),
             Err(e) => Ok(crate::grab::make_grab(snap, None, Some(e.to_string()))),
         }
     }

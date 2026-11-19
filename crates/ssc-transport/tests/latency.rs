@@ -18,6 +18,7 @@ fn answer_start(id: Uuid) -> Message {
         intent: Intent::Pricing,
         urgency: Urgency::High,
         model: "groq".into(),
+        thumb: None,
     })
 }
 

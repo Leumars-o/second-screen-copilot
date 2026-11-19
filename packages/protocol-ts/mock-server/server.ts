@@ -44,6 +44,8 @@ export interface StreamAnswerOptions {
   trigger?: AnswerStart["trigger"];
   block?: "cue" | "detail";
   end?: Partial<Omit<AnswerEnd, "answer_id">>;
+  /** CR-23b: screen-card thumbnail (data URL). */
+  thumb?: string;
 }
 
 const DEFAULT_END: Omit<AnswerEnd, "answer_id"> = {
@@ -311,7 +313,15 @@ export class MockPc {
       Array.from({ length: o.count ?? 5 }, (_, i) => (i < 5 ? `${i + 1}. ${DEFAULT_END.cues[i]!.text}\n` : `more ${i} `));
     await this.send({
       type: "answer.start",
-      payload: { answer_id, trigger: o.trigger ?? "question", format: o.format ?? "cue", intent: "technical", urgency: o.urgency ?? "high", model: "mock/fast" },
+      payload: {
+        answer_id,
+        trigger: o.trigger ?? "question",
+        format: o.format ?? "cue",
+        intent: "technical",
+        urgency: o.urgency ?? "high",
+        model: "mock/fast",
+        ...(o.thumb ? { thumb: o.thumb } : {}),
+      },
     });
     for (const d of deltas) {
       if (o.intervalMs) await new Promise((r) => setTimeout(r, o.intervalMs));

@@ -13,6 +13,7 @@ local-stt = ["ssc-stt/local-stt"]
 fastembed = ["ssc-memory/fastembed"]
 
 [dependencies]
+base64 = "0.22"
 ssc-core.workspace = true
 ssc-audio = { path = "../ssc-audio" }
 ssc-stt = { path = "../ssc-stt" }

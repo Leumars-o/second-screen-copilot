@@ -27,10 +27,13 @@ Documents:
 Recent transcript:
 <untrusted>{{transcript}}</untrusted>
 
-Focused window:
+Focused window, and the user's own question about it (if any):
 <untrusted>{{question}}</untrusted>
+
+Your earlier answer about this screen (if any):
+{{answer}}
 
 Window text:
 <untrusted>{{screen}}</untrusted>
 
-Now answer the question on the screen. Line 1 is the answer, not the question.
+Now answer: the user's own question if there is one, otherwise the question on the screen. Line 1 is the answer, not the question.

@@ -153,6 +153,9 @@ pub struct AnswerStart {
     pub intent: Intent,
     pub urgency: Urgency,
     pub model: String,
+    /// CR-23b: screen answers carry a thumbnail of what was captured (`data:image/jpeg;base64,…`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumb: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

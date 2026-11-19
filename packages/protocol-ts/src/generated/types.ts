@@ -124,6 +124,10 @@ export interface AnswerStart {
   intent: "pricing" | "objection" | "technical" | "scheduling" | "small_talk" | "none";
   urgency: "low" | "medium" | "high";
   model: string;
+  /**
+   * CR-23b: small JPEG of what the screen answer was given (≤480 px, ≤30 KB), so the user sees what the model saw.
+   */
+  thumb?: string;
 }
 
 // ---- command ----

@@ -30,6 +30,8 @@ struct WordWindow {
     snapshots: AtomicUsize,
     /// Fail every grab like the lead's "no focused application".
     fail: bool,
+    /// The window is read but the image capture fails (E).
+    no_image: bool,
 }
 
 impl WordWindow {
@@ -55,7 +57,11 @@ impl ScreenSource for WordWindow {
             return Err(ssc_core::SscError::Unavailable("no focused application (AXError -25204)".into()));
         }
         let mut g = ScreenGrab::from_snapshot(Self::snap(), None);
-        if image {
+        if image && self.no_image {
+            g.image_error = Some("ScreenCaptureKit capture failed: denied".into());
+        } else if image {
+            g.thumb = Some(vec![0xFF, 0xD8, 9, 0xFF, 0xD9]);
+            g.window_size = Some((1440, 872));
             g.image = Some(PromptImage { mime: "image/jpeg".into(), data: JPEG.to_vec() });
             g.image_size = Some((1600, 1000));
         }
@@ -77,7 +83,15 @@ fn rig(mode: Mode, screen_watch: bool, responses: &[&str]) -> Rig {
     rig_with(mode, screen_watch, responses, false)
 }
 
+fn rig_window(mode: Mode, responses: &[&str], window: WordWindow) -> Rig {
+    rig_full(mode, false, responses, window)
+}
+
 fn rig_with(mode: Mode, screen_watch: bool, responses: &[&str], fail_grabs: bool) -> Rig {
+    rig_full(mode, screen_watch, responses, WordWindow { fail: fail_grabs, ..Default::default() })
+}
+
+fn rig_full(mode: Mode, screen_watch: bool, responses: &[&str], window: WordWindow) -> Rig {
     let clock = Arc::new(TokioClock::new(BASE_MS));
     let memory = seeded_memory(clock.clone());
     let model = Arc::new(ScriptedAnswer::new(
@@ -94,7 +108,7 @@ fn rig_with(mode: Mode, screen_watch: bool, responses: &[&str], fail_grabs: bool
     .unwrap();
     let (pc, ph) = MockTransport::pair_with_clock(clock.clone());
     let phone = phone(Arc::new(ph), 12);
-    let screen = Arc::new(WordWindow { fail: fail_grabs, ..Default::default() });
+    let screen = Arc::new(window);
     let parts = Parts {
         screen: Some(screen.clone() as Arc<dyn ScreenSource>),
         audio: vec![],
@@ -152,7 +166,7 @@ async fn cloud_screen_hotkey_sends_the_image_and_window_text_and_streams_a_scree
         assert_eq!(p.images[0].data, JPEG);
         assert!(p.dynamic.contains(QUESTION), "window text reaches the model:\n{}", p.dynamic);
         assert!(p.dynamic.contains("Microsoft Word — Quiz.docx"));
-        assert!(p.prefix.contains("pressed the screen hotkey"), "screen.v3 prompt");
+        assert!(p.prefix.contains("pressed the screen hotkey"), "screen.v4 prompt");
     }
     assert_eq!(*r.screen.grabs.lock().unwrap(), vec![true]);
 
@@ -251,13 +265,60 @@ async fn failed_screen_read_reaches_the_phone_status_and_logs() {
         let got = r.phone.got.lock().unwrap();
         assert!(got.iter().any(|e| matches!(&e.message, Message::AnswerEnd(x) if x.reason == AnswerEndReason::Error)));
         assert!(got.iter().any(|e| matches!(&e.message, Message::AgentLog(l)
-            if l.entries.iter().any(|e| e.level == LogLevel::Error && e.text.contains("could not read the focused window")))));
+            if l.entries.iter().any(|e| e.level == LogLevel::Error && e.text.contains("could not capture the screen")))));
     }
     r.phone.send(None, Command::AgentSync).await;
     r.phone.wait_for("status on sync", |m| matches!(m, Message::AgentStatus(_))).await;
     let env = r.phone.wait_for("backlog", |m| matches!(m, Message::AgentLog(l) if l.entries.len() > 1 || l.entries.iter().any(|e| e.text.contains("focused window")))).await;
     let Message::AgentLog(b) = env.message else { unreachable!() };
-    assert!(b.entries.iter().any(|e| e.text.contains("could not read the focused window")));
+    assert!(b.entries.iter().any(|e| e.text.contains("could not capture the screen")));
     // Never prompts or screen text in the log feed.
     assert!(b.entries.iter().all(|e| !e.text.contains("===== PREFIX")));
+}
+
+/// B: the card shows what was captured. E: a failed image capture is an error card, never an
+/// answer guessed from the window text (no model call).
+#[tokio::test(start_paused = true)]
+async fn thumbnail_rides_on_the_card_and_a_failed_capture_says_so() {
+    let mut r = rig(Mode::Cloud, false, &[SCREEN_ANSWER]);
+    r.pipeline.answer_from_screen().unwrap();
+    let env = r.phone.wait_for("answer.start", |m| matches!(m, Message::AnswerStart(_))).await;
+    let Message::AnswerStart(s) = env.message else { unreachable!() };
+    assert_eq!(s.thumb.as_deref(), Some("data:image/jpeg;base64,/9gJ/9k="));
+    wait_end(&mut r).await;
+
+    let mut r = rig_window(Mode::Cloud, &[SCREEN_ANSWER], WordWindow { no_image: true, ..Default::default() });
+    r.pipeline.answer_from_screen().unwrap();
+    let end = wait_end(&mut r).await;
+    assert_eq!(end.reason, AnswerEndReason::Error);
+    let got = r.phone.got.lock().unwrap().clone();
+    let card: String = got
+        .iter()
+        .filter_map(|e| match &e.message {
+            Message::AnswerDelta(d) => Some(d.text.clone()),
+            _ => None,
+        })
+        .collect();
+    assert!(card.starts_with("Couldn't capture the screen: ScreenCaptureKit capture failed"), "{card}");
+    assert!(r.model.prompts.lock().unwrap().is_empty(), "no answer guessed from text");
+}
+
+/// G: a follow-up on a screen card asks about the same screenshot, with the earlier answer.
+#[tokio::test(start_paused = true)]
+async fn follow_up_on_a_screen_card_keeps_the_screenshot_and_the_answer() {
+    let mut r = rig(Mode::Cloud, false, &[SCREEN_ANSWER, "Because it runs a trained model.\n"]);
+    let id = r.pipeline.answer_from_screen().unwrap();
+    wait_end(&mut r).await;
+    r.phone.send(None, Command::Followup { answer_id: Some(id), text: "why is that the answer?".into() }).await;
+    let env = r.phone.wait_for("follow-up start", |m| matches!(m, Message::AnswerStart(s) if s.answer_id != id)).await;
+    let Message::AnswerStart(s) = env.message else { unreachable!() };
+    assert_eq!(s.format, AnswerFormat::Screen);
+    wait_end(&mut r).await;
+    assert_eq!(r.screen.grabs.lock().unwrap().len(), 1, "no new capture");
+    let prompts = r.model.prompts.lock().unwrap();
+    let p = &prompts[1];
+    assert_eq!(p.images.len(), 1, "same screenshot");
+    assert_eq!(p.images[0].data, JPEG);
+    assert!(p.dynamic.contains("The user asks: why is that the answer?"), "{}", p.dynamic);
+    assert!(p.dynamic.contains("Running a trained model on new data"), "earlier answer quoted:\n{}", p.dynamic);
 }

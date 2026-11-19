@@ -127,6 +127,10 @@ pub struct ScreenGrab {
     pub image_size: Option<(u32, u32)>,
     /// Why an image was asked for but not produced (permission, no bounds, ...).
     pub image_error: Option<String>,
+    /// CR-23b: small JPEG of what was captured (≤480 px, ≤30 KB), shown on the phone's card.
+    pub thumb: Option<Vec<u8>>,
+    /// Captured window size in points (before scaling), for the capture log line.
+    pub window_size: Option<(i32, i32)>,
 }
 
 impl ScreenGrab {
@@ -140,6 +144,8 @@ impl ScreenGrab {
             image: None,
             image_size: None,
             image_error,
+            thumb: None,
+            window_size: None,
         }
     }
 

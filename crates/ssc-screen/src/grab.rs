@@ -3,7 +3,7 @@
 
 use crate::ocr::RgbFrame;
 pub use ssc_core::types::ScreenGrab;
-use ssc_core::types::{PromptImage, ScreenSnapshot};
+use ssc_core::types::{PromptImage, Rect, ScreenSnapshot};
 use ssc_core::{Result, SscError};
 
 /// Longest side of the image sent to the model. Enough for body text in a full window on a
@@ -23,6 +23,102 @@ pub(crate) fn make_grab(
         g.image_size = Some((w, h));
     }
     g
+}
+
+/// Grab from a captured frame: the full JPEG for the model plus the phone thumbnail.
+pub(crate) fn grab_from_frame(snap: ScreenSnapshot, f: &RgbFrame, window: Rect) -> ssc_core::Result<ScreenGrab> {
+    let jpeg = encode_jpeg(f, JPEG_QUALITY)?;
+    let mut g = make_grab(snap, Some((f.width, f.height, jpeg)), None);
+    g.thumb = thumbnail_jpeg(f);
+    g.window_size = Some((window.w, window.h));
+    Ok(g)
+}
+
+/// Thumbnail limits: one relay frame is 64 KB, and the thumbnail rides base64 in `answer.start`.
+pub const THUMB_MAX_EDGE: u32 = 480;
+pub const THUMB_MAX_BYTES: usize = 30_000;
+
+/// Area-average downscale (deterministic box filter) so the longer side is at most `max_edge`.
+pub fn downscale(f: &RgbFrame, max_edge: u32) -> RgbFrame {
+    let (w, h) = fit_within(f.width, f.height, max_edge);
+    if (w, h) == (f.width, f.height) {
+        return f.clone();
+    }
+    let (sw, sh) = (f.width as usize, f.height as usize);
+    let mut out = vec![0u8; w as usize * h as usize * 3];
+    for ty in 0..h as usize {
+        let y0 = ty * sh / h as usize;
+        let y1 = ((ty + 1) * sh / h as usize).max(y0 + 1).min(sh);
+        for tx in 0..w as usize {
+            let x0 = tx * sw / w as usize;
+            let x1 = ((tx + 1) * sw / w as usize).max(x0 + 1).min(sw);
+            let mut acc = [0u32; 3];
+            for y in y0..y1 {
+                let row = &f.rgb[(y * sw + x0) * 3..(y * sw + x1) * 3];
+                for px in row.chunks_exact(3) {
+                    acc[0] += u32::from(px[0]);
+                    acc[1] += u32::from(px[1]);
+                    acc[2] += u32::from(px[2]);
+                }
+            }
+            let n = ((y1 - y0) * (x1 - x0)) as u32;
+            let o = (ty * w as usize + tx) * 3;
+            for c in 0..3 {
+                out[o + c] = (acc[c] / n) as u8;
+            }
+        }
+    }
+    RgbFrame { width: w, height: h, rgb: out }
+}
+
+/// A JPEG thumbnail under [`THUMB_MAX_BYTES`], trying lower quality, then a smaller size.
+pub fn thumbnail_jpeg(f: &RgbFrame) -> Option<Vec<u8>> {
+    for (edge, q) in [(THUMB_MAX_EDGE, 60), (THUMB_MAX_EDGE, 40), (360, 40), (240, 35)] {
+        let j = encode_jpeg(&downscale(f, edge), q).ok()?;
+        if j.len() <= THUMB_MAX_BYTES {
+            return Some(j);
+        }
+    }
+    None
+}
+
+/// One on-screen window from the window server (front to back order), for [`pick_front_window`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct WinInfo {
+    pub app: String,
+    pub title: String,
+    pub pid: i64,
+    pub layer: i64,
+    pub alpha: f64,
+    pub rect: Rect,
+}
+
+/// Smallest window treated as an app's real window, points. Browser hover cards, bubbles and
+/// tooltips are normal-layer windows on top of the page but smaller than this (CR-22c).
+pub const MIN_MAIN_WINDOW: (i32, i32) = (300, 200);
+
+/// The window the user is looking at: the front app is the owner of the frontmost normal window;
+/// its frontmost window of at least [`MIN_MAIN_WINDOW`] is the one to capture (not a helper
+/// bubble that happens to be first). Skips our own process, invisible windows, and system UI.
+pub fn pick_front_window(wins: &[WinInfo], me: i64) -> Option<(String, String, Rect)> {
+    let candidates: Vec<&WinInfo> = wins
+        .iter()
+        .filter(|w| {
+            w.layer == 0
+                && w.alpha > 0.0
+                && w.pid != me
+                && w.rect.w >= 100
+                && w.rect.h >= 60
+                && crate::reader::is_grab_target(&w.app)
+        })
+        .collect();
+    let front = *candidates.first()?;
+    let main = candidates
+        .iter()
+        .find(|w| w.pid == front.pid && w.rect.w >= MIN_MAIN_WINDOW.0 && w.rect.h >= MIN_MAIN_WINDOW.1)
+        .copied()
+        .unwrap_or(front);
+    Some((main.app.clone(), main.title.clone(), main.rect))
 }
 
 /// Target size so the longer side is at most `max_edge` (never upscaled, never 0).
@@ -59,6 +155,64 @@ mod tests {
     use crate::walk::{WalkLimits, walk};
     use ssc_core::types::Rect;
     use std::sync::Mutex;
+
+    fn win(app: &str, pid: i64, w: i32, h: i32) -> WinInfo {
+        WinInfo { app: app.into(), title: String::new(), pid, layer: 0, alpha: 1.0, rect: Rect { x: 0, y: 0, w, h } }
+    }
+
+    #[test]
+    fn front_window_is_the_front_apps_main_window_not_a_helper_bubble() {
+        // The lead's quiz: a Chrome hover card sits first in front-to-back order.
+        let wins = vec![
+            win("Google Chrome", 7, 260, 90),    // hover card over the tab strip
+            win("Google Chrome", 7, 1840, 1300), // the page
+            win("Code", 3, 1440, 872),
+        ];
+        let (app, _, r) = pick_front_window(&wins, 99).unwrap();
+        assert_eq!((app.as_str(), r.w, r.h), ("Google Chrome", 1840, 1300));
+        // A big window from another app behind is never chosen over the front app's own.
+        let wins = vec![win("Safari", 5, 1200, 800), win("Code", 3, 1440, 872)];
+        assert_eq!(pick_front_window(&wins, 99).unwrap().0, "Safari");
+        // Only a small window: use it rather than nothing.
+        assert_eq!(pick_front_window(&[win("Calculator", 4, 230, 380)], 99).unwrap().2.w, 230);
+        // Our own window, system UI, invisible and non-normal layers are skipped.
+        let mut hidden = win("Safari", 5, 1200, 800);
+        hidden.alpha = 0.0;
+        let mut menu = win("Safari", 5, 1200, 800);
+        menu.layer = 25;
+        let wins = vec![
+            win("ssc-agent", 99, 900, 760),
+            win("UserNotificationCenter", 2, 400, 120),
+            hidden,
+            menu,
+            win("Code", 3, 1440, 872),
+        ];
+        assert_eq!(pick_front_window(&wins, 99).unwrap().0, "Code");
+    }
+
+    #[test]
+    fn downscale_averages_and_thumbnail_fits_a_relay_frame() {
+        // 4x2: left half black, right half white -> 2x1: black, white.
+        let mut rgb = vec![0u8; 4 * 2 * 3];
+        for y in 0..2 {
+            for x in 2..4 {
+                rgb[(y * 4 + x) * 3..(y * 4 + x) * 3 + 3].fill(255);
+            }
+        }
+        let d = downscale(&RgbFrame { width: 4, height: 2, rgb }, 2);
+        assert_eq!((d.width, d.height, d.rgb.clone()), (2, 1, vec![0, 0, 0, 255, 255, 255]));
+        // Noisy 1600x1000 frame (worst case for JPEG): still under the limit.
+        let mut seed = 7u32;
+        let rgb: Vec<u8> = (0..1600 * 1000 * 3)
+            .map(|_| {
+                seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12345);
+                (seed >> 16) as u8
+            })
+            .collect();
+        let t = thumbnail_jpeg(&RgbFrame { width: 1600, height: 1000, rgb }).unwrap();
+        assert!(t.len() <= THUMB_MAX_BYTES, "{}", t.len());
+        assert_eq!(&t[..2], &[0xFF, 0xD8]);
+    }
 
     #[test]
     fn fit_within_keeps_aspect_and_never_upscales() {
@@ -289,10 +443,12 @@ mod real {
         let g = r.grab_window(true).unwrap();
         let ms = t.elapsed().as_millis();
         println!(
-            "grab {ms} ms: app={:?} image={:?} jpeg_bytes={} text_chars={} error={:?}",
+            "grab {ms} ms: app={:?} image={:?} jpeg_bytes={} thumb_bytes={} window={:?} text_chars={} error={:?}",
             g.app,
             g.image_size,
             g.image.as_ref().map_or(0, |i| i.data.len()),
+            g.thumb.as_ref().map_or(0, Vec::len),
+            g.window_size,
             g.text.chars().count(),
             g.image_error
         );

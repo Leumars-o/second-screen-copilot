@@ -12,6 +12,7 @@
     "format": { "enum": ["cue", "fact", "objection", "screen"] },
     "intent": { "enum": ["pricing", "objection", "technical", "scheduling", "small_talk", "none"] },
     "urgency": { "enum": ["low", "medium", "high"] },
-    "model": { "type": "string", "minLength": 1, "maxLength": 128 }
+    "model": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "thumb": { "type": "string", "pattern": "^data:image/jpeg;base64,[A-Za-z0-9+/=]+$", "maxLength": 41000, "description": "CR-23b: small JPEG of what the screen answer was given (≤480 px, ≤30 KB), so the user sees what the model saw." }
   }
 }

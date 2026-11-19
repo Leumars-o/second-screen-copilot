@@ -139,3 +139,8 @@ h2 { font-size: 15px; text-transform: uppercase; letter-spacing: 0.06em; color: 
 .log-t, .log-src { color: var(--muted); }
 .log-warn { color: #e3b341; }
 .log-error { color: #f85149; }
+
+/* CR-23b: screenshot the screen answer used */
+.thumb { display: block; padding: 0; margin: 4px 0 10px; border: 1px solid #2a323c; border-radius: 8px; overflow: hidden; background: none; max-width: 45%; }
+.thumb img { display: block; width: 100%; height: auto; }
+.thumb-big { max-width: 100%; }

@@ -167,7 +167,7 @@ fn prompts_follow_contract() {
         "answer",
         "session",
     ];
-    for name in ["cue.v2", "fact.v1", "objection.v1", "expand.v1", "summary.v1", "followup.v1", "screen.v3"] {
+    for name in ["cue.v2", "fact.v1", "objection.v1", "expand.v1", "summary.v1", "followup.v1", "screen.v4"] {
         let p = std::fs::read_to_string(contracts().join(format!("prompts/{name}.md"))).unwrap();
         assert_eq!(p.lines().filter(|l| *l == "<<<DYNAMIC>>>").count(), 1, "{name}: one DYNAMIC marker");
         let (prefix, dynamic) = p.split_once("<<<DYNAMIC>>>").unwrap();

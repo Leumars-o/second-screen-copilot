@@ -93,7 +93,7 @@ impl PromptKind {
             Self::Expand => include_str!("../../../contracts/prompts/expand.v1.md"),
             Self::Summary => include_str!("../../../contracts/prompts/summary.v1.md"),
             Self::Followup => include_str!("../../../contracts/prompts/followup.v1.md"),
-            Self::Screen => include_str!("../../../contracts/prompts/screen.v3.md"),
+            Self::Screen => include_str!("../../../contracts/prompts/screen.v4.md"),
         }
     }
 

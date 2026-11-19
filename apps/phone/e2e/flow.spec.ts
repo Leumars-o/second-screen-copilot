@@ -248,6 +248,10 @@ test("CR-19: a pairing link opened in the app's own tab (hash change only) also 
   expect(new URL(page.url()).hash).toBe("");
 });
 
+/** A 1x1 JPEG as a data URL. */
+const TINY_JPEG =
+  "data:image/jpeg;base64,/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAMCAgICAgMCAgIDAwMDBAYEBAQEBAgGBgUGCQgKCgkICQkKDA8MCgsOCwkJDRENDg8QEBEQCgwSExIQEw8QEBD/yQALCAABAAEBAREA/8wABgAQEAX/2gAIAQEAAD8A0s8g/9k=";
+
 test("CR-20: a screen answer shows the answer and its working as free text", async ({ request }) => {
   await mock.post(request, "answer", {
     format: "screen",
@@ -258,10 +262,16 @@ test("CR-20: a screen answer shows the answer and its working as free text", asy
       { block: "detail", text: "2: B and D have no incoming arrows.\n" },
     ],
     end: { cues: [] },
+    thumb: TINY_JPEG,
   });
   const card = page.getByTestId("answer-current");
   await expect(card).toHaveAttribute("data-state", "done");
   await expect(card.locator(".chip").first()).toHaveText("Screen");
+  // B: the screenshot the answer used, tap to enlarge (CSP allows data: images).
+  const thumb = card.getByTestId("screen-thumb");
+  await expect(thumb.locator("img")).toHaveAttribute("src", TINY_JPEG);
+  await thumb.click();
+  await expect(thumb).toHaveClass(/thumb-big/);
   await expect(card.getByTestId("stream-cue")).toHaveText("C — the arrow from A points to box C\n");
   await expect(card.getByTestId("stream-detail")).toContainText("2: B and D have no incoming arrows.");
   await expect(card.getByTestId("cues")).toHaveCount(0);
